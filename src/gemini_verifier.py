@@ -1,5 +1,20 @@
 """
-gemini_verifier.py - Gemini second opinion on every saved fall.
+gemini_verifier.py - KEY 1 (GEMINI_API_KEY): removes FAKE and DUPLICATE fall detections.
+
+Job of this check (the injury details are the job of gemini_injury.py, KEY 2):
+  1. FAKE?       Is the boxed player really on the ground from a fall / tackle / collision,
+                 or is it a false alarm (sliding tackle and straight up, keeper dive, celebration,
+                 referee / coach, wrong person boxed ...)?          -> fake: event deleted
+  2. DUPLICATE?  Was the SAME fall already saved a few seconds earlier (same player, same
+                 incident, e.g. the player is still on the ground and was flagged again)?
+                 Gemini compares this fall with the earlier falls of the last
+                 DUPLICATE_WINDOW_SEC seconds of video.             -> duplicate: newer event deleted
+  3. NO UNIDENTIFIED FALLS: Gemini reads the shirt number; when it cannot read it, it picks
+     the most likely player of the roster (kit, position, build). An Unidentified fall gets
+     that player straight away (the dashboard shows the name, WhatsApp gets the update).
+     The detector's own jersey / face read still replaces a Gemini guess when it is surer.
+Deleted events get a WhatsApp "please ignore" message (when their alert was sent).
+gemini_injury.py waits for this check and skips events deleted here.
 
 Interface used by multi_player_injury.py:
     start(), submit(ids, raw_frames, target_index, target_box, context),
@@ -11,8 +26,8 @@ What it does for each saved fall (runs in a background thread):
   - Sends the fall-moment frame (target player boxed), a zoomed crop and a few
     surrounding frames to Gemini.
   - Sends Gemini's answer to the backend (PATCH /events/{id}/gemini), which
-    stores it so the dashboard shows it, and applies the rules:
-      confident false alarm  -> event row (and its clip file) deleted
+    stores it and applies the rules:
+      confident false alarm or duplicate -> event row (and its clip file) deleted
       confident jersey read that differs from / fills in our player -> event updated
 Any error = event left untouched (fails safe).
 Only the FIRST event id of a clip is judged (that is the boxed player).
@@ -26,6 +41,7 @@ import json
 import time
 import queue
 import threading
+from collections import deque
 
 import cv2
 import requests
@@ -49,6 +65,11 @@ for _p in (
 _ENV_MODEL = os.getenv("GEMINI_MODEL", "").strip()
 
 FALSE_ALARM_CONFIDENCE = 0.85   # delete an event only if Gemini is at least this sure it is NOT a fall
+DUPLICATE_CONFIDENCE = 0.85     # delete a fall as a duplicate only if Gemini is at least this sure
+DUPLICATE_WINDOW_SEC = 20       # compare with earlier falls up to this many seconds before (video time)
+MAX_DUPLICATE_CANDIDATES = 3    # earlier falls shown to Gemini at most
+SEND_WHATSAPP_IGNORE = True     # WhatsApp "please ignore" after a fake / duplicate is deleted
+FILL_UNIDENTIFIED = True        # every kept fall gets a player: jersey read, else Gemini's best guess
 JERSEY_CONFIDENCE = 0.85        # replace/fill the player only if the jersey read is at least this sure
 DECIDED_CONFIDENCE = 0.60       # below this the verdict is stored as "unsure"
 MAX_SEQUENCE_FRAMES = 6         # surrounding frames sent besides the fall frame and the crop
@@ -67,10 +88,12 @@ notify_hook = None
 # ============================================
 
 player_changes = {}        # event_id -> new player name
-deleted_event_ids = set()  # event ids Gemini removed as false alarms
+deleted_event_ids = set()  # event ids Gemini removed (fake or duplicate)
+checked_event_ids = set()  # event ids this check has finished with (gemini_injury.py waits for these)
 stats = {
     "checked": 0,
     "false_alarm_deleted": 0,
+    "duplicate_deleted": 0,
     "reassigned": 0,
     "identified": 0,
     "errors": 0,
@@ -81,6 +104,7 @@ _types = None
 _models = []
 _queue = queue.Queue()
 _worker = None
+_recent = deque(maxlen=12)  # falls kept in this run: {"event_id", "video_sec", "player", "images"}
 
 
 def is_available():
@@ -134,7 +158,7 @@ def init():
         _client = None
         return False
 
-    print("[GEMINI] Second-opinion check ON |", mode, "| model:", _models[0])
+    print("[GEMINI] Fake / duplicate check ON |", mode, "| model:", _models[0])
     return True
 
 
@@ -188,6 +212,9 @@ def _worker_loop():
         except Exception as e:
             stats["errors"] += 1
             print("[GEMINI] Check failed (event kept as is):", e)
+        finally:
+            for event_id in job[0]:
+                checked_event_ids.add(event_id)
 
 
 # ============================================
@@ -255,9 +282,24 @@ def _build_images(frames, target_index, box):
 # GEMINI CALL
 # ============================================
 
-def _prompt(context, team_names):
+def _prompt(context, team_names, candidates=None, teams_roster=None):
     teams = ", ".join(team_names) if team_names else "unknown"
+    roster_text = _roster_text(teams_roster or {})
     ctx = json.dumps(context, default=str)[:600] if context else "none"
+    candidates = candidates or []
+
+    if candidates:
+        listed = "; ".join(f"#{c['event_id']} at {c['video_time']} ({c['player'] or 'Unidentified'})" for c in candidates)
+        duplicate_step = f"""8. duplicate_of: the images labelled "EARLIER FALL #..." show falls that were already saved a few seconds
+   before this one ({listed}). If the boxed player here is the SAME player in the SAME incident as one of
+   them (same fall, e.g. still lying on the ground or getting up, flagged again), give that event number.
+   A different player, or the same player in a NEW separate fall, is NOT a duplicate: use null.
+9. duplicate_confidence: 0.0-1.0 for duplicate_of (0 if null).
+10. duplicate_reason: one short sentence for the duplicate decision."""
+    else:
+        duplicate_step = """8. duplicate_of: null (no earlier fall to compare with).
+9. duplicate_confidence: 0.
+10. duplicate_reason: empty."""
 
     return f"""You are verifying an automatic fall detector on football (soccer) broadcast footage.
 The detector flagged the player inside the green TARGET box in image 1 as having fallen / being on the ground.
@@ -274,11 +316,20 @@ Decide:
 5. team: the boxed player's team from [{teams}] judged from kit colours, else null.
 6. description: one short sentence describing what happens to the player (e.g. "tackled from behind, lands on the left knee and stays down").
 7. reason: one short sentence explaining your real_fall decision.
+{duplicate_step}
+11. player: the boxed player's NAME, exactly as written in the squad list below. Use the shirt number when
+    you can read it. When you cannot, still pick the MOST LIKELY player of that team from the kit, the
+    position on the pitch (goalkeeper, defender, forward), hair, skin tone, build and the captain's armband.
+    Always give a name from the list - never null - unless the boxed person is clearly not a player.
+12. player_confidence: 0.0-1.0 for that name (low, e.g. 0.3, when it is a best guess).
+
+Squad list:
+{roster_text}
 
 Detector context (may be partial): {ctx}
 
 Reply with JSON only:
-{{"real_fall": true, "confidence": 0.0, "jersey_number": null, "jersey_confidence": 0.0, "team": null, "description": "", "reason": ""}}"""
+{{"real_fall": true, "confidence": 0.0, "jersey_number": null, "jersey_confidence": 0.0, "team": null, "description": "", "reason": "", "duplicate_of": null, "duplicate_confidence": 0.0, "duplicate_reason": "", "player": null, "player_confidence": 0.0}}"""
 
 
 def _make_config():
@@ -301,7 +352,7 @@ def _make_config():
     return types.GenerateContentConfig(**kwargs)
 
 
-def _ask(images, context, team_names, prompt=None):
+def _ask(images, context, team_names, prompt=None, candidates=None, teams_roster=None):
     global _models
 
     types = _types
@@ -310,7 +361,11 @@ def _ask(images, context, team_names, prompt=None):
     for label, data in images:
         contents.append(label)
         contents.append(types.Part.from_bytes(data=data, mime_type="image/jpeg"))
-    contents.append(prompt or _prompt(context, team_names))
+    for c in candidates or []:
+        for label, data in c["images"]:
+            contents.append(f"EARLIER FALL #{c['event_id']} at {c['video_time']} - {label}")
+            contents.append(types.Part.from_bytes(data=data, mime_type="image/jpeg"))
+    contents.append(prompt or _prompt(context, team_names, candidates, teams_roster))
 
     config = _make_config()
 
@@ -422,6 +477,31 @@ def send_result(event_id, body, keep_false_alarm=False, min_jersey_confidence=JE
     return r.json()
 
 
+def roster():
+    """{"Portugal": [(5, "Fernando Meira", player_id), ...], ...} from the database."""
+    try:
+        from database import SessionLocal
+        from models import Team, Player
+        db = SessionLocal()
+        try:
+            out = {}
+            for p, t in db.query(Player, Team).join(Team, Team.id == Player.team_id).order_by(Team.id, Player.jersey_number):
+                out.setdefault(t.name, []).append((p.jersey_number, p.name, p.id))
+            return out
+        finally:
+            db.close()
+    except Exception as e:
+        print("[GEMINI] Could not read the roster:", e)
+        return {}
+
+
+def _roster_text(teams_roster):
+    lines = []
+    for team, players in teams_roster.items():
+        lines.append(team + ": " + ", ".join(f"#{n} {name}" for n, name, _ in players))
+    return "\n".join(lines) or "unknown"
+
+
 def team_names():
     try:
         from database import SessionLocal
@@ -477,6 +557,117 @@ def apply_answer(event_id, body, answer, previous_player=None):
     return action
 
 
+# ============================================
+# DUPLICATES AND "PLEASE IGNORE" MESSAGES
+# ============================================
+
+def _video_sec(text):
+    """'0:38:55' -> 2335.0 (None if missing)."""
+    try:
+        h, m, s = [int(x) for x in str(text).split(":")]
+        return float(h * 3600 + m * 60 + s)
+    except (TypeError, ValueError):
+        return None
+
+
+def _duplicate_candidates(video_sec):
+    """Falls kept earlier in this run, at most DUPLICATE_WINDOW_SEC before this one."""
+    if video_sec is None:
+        return []
+    out = [c for c in _recent
+           if c["event_id"] not in deleted_event_ids
+           and 0 <= video_sec - c["video_sec"] <= DUPLICATE_WINDOW_SEC]
+    return out[-MAX_DUPLICATE_CANDIDATES:]
+
+
+def _duplicate_of(raw, candidates):
+    """Gemini's duplicate answer -> (earlier event id, confidence, reason) or (None, 0, None)."""
+    try:
+        dup = int(raw.get("duplicate_of")) if raw.get("duplicate_of") not in (None, "", "null") else None
+    except (TypeError, ValueError):
+        dup = None
+    if dup is None or dup not in {c["event_id"] for c in candidates}:
+        return None, 0.0, None
+    return dup, _as_float(raw.get("duplicate_confidence")), str(raw.get("duplicate_reason") or "")[:200] or None
+
+
+def _alert_was_sent(event_id):
+    """The first WhatsApp alert is skipped for duplicates of an earlier run - no follow-up then either."""
+    try:
+        import alert_system
+        return event_id not in alert_system._duplicate_event_ids
+    except Exception:
+        return True
+
+
+def _send_ignore(event_id, context, why):
+    if not SEND_WHATSAPP_IGNORE or not _alert_was_sent(event_id):
+        return
+    who = (context or {}).get("player") or "Unidentified player"
+    when = (" at " + context["video_time"]) if (context or {}).get("video_time") else ""
+    try:
+        import whatsapp_notifier
+        whatsapp_notifier.send_message(
+            "\u2705 AthleteGuard update\nEvent #" + str(event_id) + " - " + who + when
+            + "\n" + why + " Please ignore the earlier alert."
+        )
+    except Exception as e:
+        print("[GEMINI] WhatsApp 'please ignore' not sent:", e)
+
+
+def _pick_player(raw, body, teams_roster):
+    """Gemini's answer -> (player_id, name, jersey, detail, confidence) or None."""
+    every = [(team, n, name, pid) for team, players in teams_roster.items() for n, name, pid in players]
+    if not every:
+        return None
+    team = (body.get("team") or "").strip().lower()
+    jersey = body.get("jersey_number")
+
+    # 1) readable shirt number (+ team when known)
+    if jersey is not None:
+        hits = [x for x in every if x[1] == jersey and (not team or x[0].lower() == team)]
+        if len(hits) == 1:
+            t, n, name, pid = hits[0]
+            return pid, name, n, f"Gemini read #{n} ({t})", max(0.5, body.get("jersey_confidence") or 0.5)
+
+    # 2) Gemini's named pick from the squad list
+    guess = str(raw.get("player") or "").strip().lower()
+    if guess:
+        hits = [x for x in every if x[2].lower() == guess] or [x for x in every if guess in x[2].lower() or x[2].lower() in guess]
+        if hits:
+            t, n, name, pid = hits[0]
+            conf = _as_float(raw.get("player_confidence")) or 0.3
+            return pid, name, n, f"Gemini best guess from the clip ({t}, kit and position)", min(conf, 0.84)
+    return None
+
+
+def _fill_unidentified(event_id, raw, body, answer, teams_roster, context):
+    """The fall is kept but still Unidentified -> give it Gemini's player right away."""
+    if not FILL_UNIDENTIFIED:
+        return
+    event = answer.get("event") or {}
+    if event.get("identified"):
+        return
+    pick = _pick_player(raw, body, teams_roster)
+    if pick is None:
+        print(f"[GEMINI] #{event_id}: no player could be picked - stays Unidentified")
+        return
+    pid, name, jersey, detail, conf = pick
+    try:
+        import alert_system   # PATCH /events/{id}/ai-update + WhatsApp "the earlier Unidentified fall was ..."
+        ok = alert_system.update_event_player(
+            event_id, pid, name, jersey_number=jersey, event_type=event.get("event_type") or "FALL",
+            match_name=event.get("match_name"), identified_by="gemini", id_detail=detail, id_confidence=conf,
+        )
+    except Exception as e:
+        print(f"[GEMINI] #{event_id}: could not store the player:", e)
+        return
+    if ok:
+        player_changes[event_id] = name
+        stats["identified"] += 1
+        _notify(f"Event #{event_id} identified by Gemini as {name} (#{jersey}) - {detail}, {conf:.0%}.")
+
+
 def _process(job):
     ids, frames, target_index, box, context = job
     event_id = ids[0]   # the clip's target box belongs to the first event
@@ -486,19 +677,58 @@ def _process(job):
     if not images:
         return
 
-    raw = _ask(images, context, team_names())
+    video_sec = _video_sec((context or {}).get("video_time"))
+    candidates = _duplicate_candidates(video_sec)
+
+    teams_roster = roster()
+    raw = _ask(images, context, list(teams_roster) or team_names(), candidates=candidates, teams_roster=teams_roster)
     stats["checked"] += 1
 
     body = to_backend(raw)
+    dup, dup_conf, dup_reason = _duplicate_of(raw, candidates)
 
     print(f"[GEMINI] #{event_id}: {body['verdict']} ({body['confidence']:.2f}) | "
           f"jersey={body['jersey_number']} ({(body['jersey_confidence'] or 0):.2f}) | "
-          f"team={body['team']} | {body['reason']}")
+          f"team={body['team']} | {body['reason']}"
+          + (f" | duplicate of #{dup} ({dup_conf:.2f})" if dup is not None else ""))
 
     previous = (context or {}).get("player")
 
-    # false alarms are removed only when Gemini is at least FALSE_ALARM_CONFIDENCE sure
-    keep = body["verdict"] == "false_alarm" and body["confidence"] < FALSE_ALARM_CONFIDENCE
+    # 1) FAKE: removed only when Gemini is at least FALSE_ALARM_CONFIDENCE sure
+    fake = body["verdict"] == "false_alarm" and body["confidence"] >= FALSE_ALARM_CONFIDENCE
 
+    # 2) DUPLICATE of a fall saved a few seconds earlier: the newer event is removed
+    if not fake and dup is not None and dup_conf >= DUPLICATE_CONFIDENCE:
+        dup_body = dict(body, verdict="false_alarm", confidence=dup_conf,
+                        reason=f"Duplicate of event #{dup}. {dup_reason or ''}".strip())
+        answer = send_result(event_id, dup_body, min_jersey_confidence=JERSEY_CONFIDENCE)
+        if answer.get("action") == "deleted":
+            deleted_event_ids.add(event_id)
+            stats["duplicate_deleted"] += 1
+            _notify(f"Event #{event_id} ({previous or 'Unidentified'}) removed - duplicate of event #{dup} "
+                    f"(confidence {dup_conf:.2f}). {dup_reason or ''}")
+            _send_ignore(event_id, context, f"Same fall as event #{dup} (detected twice).")
+            return
+        # not deleted (e.g. a staff member already identified it): keep it as a normal fall below
+
+    keep = not fake
     answer = send_result(event_id, body, keep_false_alarm=keep, min_jersey_confidence=JERSEY_CONFIDENCE)
-    apply_answer(event_id, body, answer, previous_player=previous)
+    action = apply_answer(event_id, body, answer, previous_player=previous)
+
+    if action == "deleted":
+        _send_ignore(event_id, context, "Not a real fall (" + (body.get("reason") or "false alarm") + ").")
+        return
+
+    # kept and still Unidentified -> Gemini's player straight away (no waiting for the detector)
+    if action not in ("identified", "reassigned", "missing"):
+        _fill_unidentified(event_id, raw, body, answer, teams_roster, context)
+
+    # kept -> later falls are compared with this one
+    if video_sec is not None and action != "missing":
+        _recent.append({
+            "event_id": event_id,
+            "video_sec": video_sec,
+            "video_time": context.get("video_time"),
+            "player": player_changes.get(event_id) or previous,
+            "images": images[:2],   # boxed fall frame + zoomed crop
+        })

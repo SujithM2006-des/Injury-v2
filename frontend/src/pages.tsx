@@ -131,7 +131,6 @@ export function PossibleInjuries({ e, compact = false }: { e: InjuryEvent; compa
         <p className="text-xs font-semibold uppercase tracking-wide text-amber-900">Possible injuries</p>
         {a.rest && <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-0.5 text-xs font-semibold text-amber-900 ring-1 ring-amber-200"><CalendarDays size={12} />Expected rest {a.rest}</span>}
       </div>
-      {a.description && <p className="mt-1 text-xs text-amber-900">{a.description}</p>}
       <ul className="mt-2 space-y-1.5">
         {a.injuries.map((i, k) => (
           <li key={i.injury} className="rounded-lg bg-white/80 px-2.5 py-2">
@@ -613,8 +612,7 @@ export function EventLine({ e, to }: { e: InjuryEvent; to?: string }) {
         <div className="min-w-0 flex-1">
           <p className="flex items-center gap-2 truncate text-sm font-medium"><PlayerName e={e} ids={ids} /><span className="text-slate-400">{e.eventType}</span></p>
           <p className="truncate text-xs text-slate-500">{e.region ?? '—'} · {matchShort(e.matchName) ?? 'No match'}{fmtVideo(e.videoTimeSec) && ` · ${fmtVideo(e.videoTimeSec)} in video`} · detected {fmtWhen(e.timestamp)}</p>
-          {e.aiInjury ? <p className="truncate text-xs text-slate-600" title={e.aiInjury.description ?? ''}><Sparkles size={11} className="mr-1 inline text-emerald-600" />{injuryText(e)}</p>
-            : e.gemini.description && <p className="truncate text-xs text-slate-600" title={e.gemini.reason ?? ''}><Sparkles size={11} className="mr-1 inline text-emerald-600" />{e.gemini.description}</p>}
+          {e.aiInjury && <p className="truncate text-xs text-slate-600"><Sparkles size={11} className="mr-1 inline text-emerald-600" />{injuryText(e)}</p>}
         </div>
         {g && <span className="hidden sm:inline-flex" title={e.gemini.reason ?? ''}><Badge tone={g.tone}>{g.text}</Badge></span>}
         <RiskBadge level={e.risk} />

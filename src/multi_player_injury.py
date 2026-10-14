@@ -295,6 +295,10 @@ event_log = []
 # DEBUG SETTINGS
 DEBUG_FALL_METRICS = True
 
+# On-screen status text ("NO PLAYER DETECTED", "NOT GAMEPLAY ...", "AI INJURY DETECTION v2 | match").
+# False = clean video (also in the saved clips). Detection itself is not affected.
+SHOW_STATUS_TEXT = False
+
 # PLAYER VALIDATION SETTINGS
 PERSON_CONFIDENCE = 0.45
 KEYPOINT_CONFIDENCE = 0.35
@@ -1160,6 +1164,21 @@ def resolve_pending_identifications():
             del pending_identification[event_id]
 
 
+# DISPLAY WINDOW
+# Resizable window that opens at about the same size as before.
+#   - Maximize button (the square next to X): fills the screen, click it again to go back
+#   - F key: true full screen without the title bar, press F again to go back
+WINDOW_NAME = "AI Injury Detection v2"
+WINDOW_WIDTH = 1100              # normal (not full screen) window width; height follows the video shape
+cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+_vid_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1920
+_vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
+_win_w = min(WINDOW_WIDTH, _vid_w)
+_win_h = int(_win_w * _vid_h / _vid_w)
+cv2.resizeWindow(WINDOW_NAME, _win_w, _win_h)
+is_fullscreen = False
+print("Window: maximize button or F = full screen (press again to go back)")
+
 # VIDEO LOOP
 
 while True:
@@ -1506,12 +1525,12 @@ while True:
                     last_collision_frame[pair_key] = frame_count
                     for tid in pair_key:
                         record_event(tid, "COLLISION", "N/A", 0, "MEDIUM", "COLLISION")
-        if not any_valid_player_this_frame:
+        if SHOW_STATUS_TEXT and not any_valid_player_this_frame:
             cv2.putText(
                 annotated_frame, "NO VALID PLAYER",
                 (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2
             )
-    else:
+    elif SHOW_STATUS_TEXT:
         cv2.putText(
             annotated_frame, "NO PLAYER DETECTED",
             (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2
@@ -1520,22 +1539,31 @@ while True:
     # FILL IN PLAYERS ON UNIDENTIFIED EVENTS
     resolve_pending_identifications()
     banner_y = annotated_frame.shape[0] - 20
-    cv2.putText(
-        annotated_frame, "AI INJURY DETECTION v2 | " + display_text(MATCH_NAME),
-        (20, banner_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
-    )
-    if not is_gameplay_shot:
+    if SHOW_STATUS_TEXT:
+        cv2.putText(
+            annotated_frame, "AI INJURY DETECTION v2 | " + display_text(MATCH_NAME),
+            (20, banner_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
+        )
+    if SHOW_STATUS_TEXT and not is_gameplay_shot:
         cv2.putText(
             annotated_frame, "NOT GAMEPLAY (close-up / crowd) - fall detection paused",
             (20, banner_y - 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2
         )
     # CLIP BUFFERS: annotated frame for the saved clip, raw frame for Gemini
     update_clips(shrink_for_clip(annotated_frame), shrink_for_clip(frame))
-    cv2.imshow("AI Injury Detection v2", annotated_frame)
+    cv2.imshow(WINDOW_NAME, annotated_frame)
     key = cv2.waitKey(max(1, int(1000 / EFFECTIVE_FPS))) & 0xFF
     if key == ord("q"):
         print("Q pressed")
         break
+    if key == ord("f"):
+        is_fullscreen = not is_fullscreen
+        cv2.setWindowProperty(
+            WINDOW_NAME, cv2.WND_PROP_FULLSCREEN,
+            cv2.WINDOW_FULLSCREEN if is_fullscreen else cv2.WINDOW_NORMAL,
+        )
+        if not is_fullscreen:
+            cv2.resizeWindow(WINDOW_NAME, _win_w, _win_h)
 
 # SHUTDOWN
 

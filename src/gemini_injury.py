@@ -1,19 +1,20 @@
 """
-gemini_injury.py - Gemini injury check on every saved fall (uses its OWN API key).
+gemini_injury.py - KEY 2 (GEMINI_INJURY_API_KEY): possible injuries of the REAL falls.
 
 Key:  GEMINI_INJURY_API_KEY in .env   (falls back to GEMINI_API_KEY if not set)
+On only when .env has GEMINI_INJURY_CHECK=1.
 
-For each saved fall clip (runs in a background thread, never slows detection):
-  1. Is this a REAL fall / injury, or a normal football action
-     (sliding tackle, goalkeeper dive, bicycle kick landing, knee-slide celebration,
-     dive / simulation where the player is straight back up)?
-       - surely NOT an injury  -> event (and its clip) deleted, WhatsApp "please ignore" follow-up
-  2. Real (or unsure): Gemini watches the clip and picks the possible injuries ONLY from
-     injury_catalog.py. Risk, safety measure and rest time always come from the catalog.
-       - stored through the backend (PATCH /events/{id}/ai-injury -> output/ai_injury.json)
-       - WhatsApp follow-up with the possible injuries and the expected rest
+Fake and duplicate falls are removed by KEY 1 (gemini_verifier.py). This check waits for
+that decision, skips the removed events, and NEVER deletes anything itself.
 
-The dashboard shows only the possible injuries and rest. The yes/no check itself is not shown.
+For each remaining fall (background thread, never slows detection):
+  - Gemini watches the clip: which body part took the impact and how, and picks the
+    possible injuries ONLY from injury_catalog.py.
+  - Risk, the recommended safety measure (first step) and the rest time always come from
+    the catalog, never invented by Gemini.
+  - Stored through the backend (PATCH /events/{id}/ai-injury -> output/ai_injury.json),
+    shown on the dashboard, and sent as a WhatsApp follow-up.
+
 Any error = event left exactly as it is (fails safe).
 
 Interface used by multi_player_injury.py:
@@ -50,14 +51,14 @@ for _p in (
 # Force one model without editing code:  $env:GEMINI_INJURY_MODEL="gemini-3.5-flash"
 _ENV_MODEL = os.getenv("GEMINI_INJURY_MODEL", "").strip() or os.getenv("GEMINI_MODEL", "").strip()
 
-NOT_INJURY_DELETE_CONFIDENCE = 0.85   # delete the event only if Gemini is at least this sure it is NOT an injury
+WAIT_FOR_FAKE_CHECK_SEC = 300        # how long to wait for KEY 1's fake / duplicate decision
 MAX_INJURIES = 3                      # possible injuries kept per event
 MAX_SEQUENCE_FRAMES = 10              # chronological frames sent besides the boxed frame and the crop
 JPEG_QUALITY = 85
 MAX_RETRIES = 2
 SHUTDOWN_TIMEOUT_SEC = 240
 
-SEND_WHATSAPP_FOLLOW_UP = True        # send the possible injuries / "please ignore" message after the first alert
+SEND_WHATSAPP_FOLLOW_UP = True        # send the possible injuries message after the first alert
 
 API_BASE = os.getenv("ATHLETEGUARD_API", "http://127.0.0.1:8000").rstrip("/")
 API_TIMEOUT = 20
@@ -68,9 +69,9 @@ DISCLAIMER = "AI estimate from the clip, not a medical diagnosis. Return to play
 # STATE READ BY multi_player_injury.py
 # ============================================
 
-deleted_event_ids = set()   # events removed because they were not an injury
+deleted_event_ids = set()   # always empty: this check never deletes (kept for multi_player_injury.py)
 results = {}                # event_id -> stored injury result
-stats = {"checked": 0, "not_injury_deleted": 0, "injuries_found": 0, "errors": 0}
+stats = {"checked": 0, "not_injury_deleted": 0, "skipped_removed": 0, "injuries_found": 0, "errors": 0}
 
 _client = None
 _types = None
@@ -129,7 +130,7 @@ def init():
         _client = None
         return False
 
-    print("[INJURY-AI] Injury check ON | key:", _key_name, "| model:", _models[0])
+    print("[INJURY-AI] Possible-injury check ON | key:", _key_name, "| model:", _models[0], "| never deletes")
     return True
 
 
@@ -254,22 +255,15 @@ def _prompt(context):
 An automatic detector flagged the player in the green TARGET box (image A) as having fallen.
 Image B is a zoomed crop of that player. The "Clip frame" images are the clip in time order.
 
-STEP 1 - Is this a REAL fall that may have injured the player?
-NOT an injury (normal football actions) - answer injury_event = false for these:
-  - a deliberate sliding tackle or slide to reach the ball, the player gets straight back up
-  - a goalkeeper diving to save or catch the ball
-  - landing from a bicycle / scissor kick or diving header and getting up normally
-  - knee-slide or other goal celebration, players piling on to celebrate
-  - a dive / simulation, a controlled roll after a challenge, then the player is up and running
-  - sitting or lying down during a stoppage, stretching, tying boots
-  - the boxed person is not a player on the pitch (referee, coach, ball boy, crowd)
-SIGNS OF A REAL INJURY: player stays down, clutches or holds a body part, rolls in pain, awkward
-landing on a joint (knee / ankle twisting, arm planted), head or neck impact, heavy collision,
-limping or unable to put weight on a leg, team-mates or staff calling for help.
-If the clip ends while the player is still down after a heavy fall, lean towards a real injury.
+This fall has already been checked and confirmed as a REAL fall (not a fake, not a duplicate).
 
-STEP 2 - If injury_event is true OR you are unsure, pick up to {MAX_INJURIES} possible injuries,
-most likely first. Use ONLY names from this list, written exactly as shown:
+STEP 1 - Which body part took the impact, and how? Look at how the player lands and what happens
+after: which part hits the ground or the opponent first, a knee or ankle twisting, an arm planted,
+head or neck impact, the player clutching or holding a body part, limping, not putting weight on a leg.
+Set injury_event = true if the player could be hurt, false only if he clearly gets up unhurt at once.
+
+STEP 2 - Pick up to {MAX_INJURIES} possible injuries for that body part, most likely first.
+Use ONLY names from this list, written exactly as shown:
 {injury_catalog.as_prompt_text()}
 
 The detector's movement analysis pointed at: {region}  (catalog areas to consider first: {", ".join(hints) or "any"}).
@@ -282,9 +276,9 @@ Reply with JSON only:
   "description": "one sentence: what happens to the player and which body part takes the impact",
   "side": "left / right / unknown",
   "possible_injuries": [{{"injury": "exact name from the list", "body_area": "area from the list", "likelihood": 0.0}}],
-  "reason": "one short sentence explaining the injury_event decision"}}
+  "reason": "one short sentence: which body part and why"}}
 confidence is 0.0-1.0 for the injury_event decision (below 0.6 when the clip is unclear).
-possible_injuries is [] when injury_event is false and you are sure."""
+possible_injuries is [] only when the player clearly gets up unhurt at once."""
 
 
 def _make_config():
@@ -451,19 +445,30 @@ def follow_up_message(event_id, context, result):
     return "\n".join(lines)
 
 
-def ignore_message(event_id, context, result):
-    what = result.get("action") or "normal play"
-    return (
-        "✅ AthleteGuard update\n"
-        "Event #" + str(event_id) + " - " + _player_text(context)
-        + ((" at " + context["video_time"]) if (context or {}).get("video_time") else "")
-        + "\nNot an injury (" + what + "). Please ignore the earlier alert."
-    )
+def _wait_for_fake_check(event_id):
+    """Waits for KEY 1 (gemini_verifier.py). False = the event was removed as fake / duplicate."""
+    try:
+        import gemini_verifier
+    except Exception:
+        return True
+    if not gemini_verifier.is_available():
+        return True     # KEY 1 is off: nothing to wait for
+    waited = 0.0
+    while event_id not in gemini_verifier.checked_event_ids and waited < WAIT_FOR_FAKE_CHECK_SEC:
+        time.sleep(1.0)
+        waited += 1.0
+    return event_id not in gemini_verifier.deleted_event_ids
 
 
 def _process(job):
     ids, frames, target_index, box, context = job
     event_id = ids[0]   # the boxed player belongs to the first event of the clip
+
+    # KEY 1 decides about fake / duplicate falls first - removed ones are not checked here
+    if not _wait_for_fake_check(event_id):
+        stats["skipped_removed"] += 1
+        print(f"[INJURY-AI] #{event_id} skipped - removed as fake / duplicate.")
+        return
 
     images = _build_images(frames, target_index, box)
     if not images:
@@ -476,19 +481,7 @@ def _process(job):
           f"{result['action']} | " + (", ".join(i["injury"] for i in result["injuries"]) or "no injuries")
           + (f" | rest {result['rest']}" if result["rest"] else ""))
 
-    # 1) surely not an injury -> remove the event (same rule the backend already uses for false alarms)
-    if not result["injury_event"] and result["confidence"] >= NOT_INJURY_DELETE_CONFIDENCE:
-        body = {"verdict": "false_alarm", "confidence": result["confidence"], "reason": result["reason"]}
-        answer = _patch("/events/" + str(event_id) + "/gemini", body)
-        if answer.get("action") == "deleted":
-            deleted_event_ids.add(event_id)
-            stats["not_injury_deleted"] += 1
-            print(f"[INJURY-AI] #{event_id} removed - not an injury ({result['action'] or 'normal play'}).")
-            if _alert_was_sent(event_id):
-                _send_whatsapp(ignore_message(event_id, context, result))
-        return
-
-    # 2) real (or unsure) with possible injuries -> store and send the follow-up
+    # this check never deletes: no possible injuries -> the event keeps the detector's own note
     if not result["injuries"]:
         return
 
