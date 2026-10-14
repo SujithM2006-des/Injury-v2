@@ -1,12 +1,35 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, NavLink, Navigate, Outlet, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, Users, Shield, CalendarDays, Activity, Zap, Bell, FileText, UserCog, Server, Settings, Menu, PanelLeft, Search, LogOut, HelpCircle, ChevronDown, UserRound, History, type LucideIcon } from 'lucide-react'
+import { LayoutDashboard, Users, Shield, CalendarDays, Activity, Zap, Bell, FileText, UserCog, Server, Settings, Menu, PanelLeft, Search, LogOut, HelpCircle, ChevronDown, UserRound, History, Info, X, type LucideIcon } from 'lucide-react'
 import { useAuth, home } from './auth'
-import type { Role } from './types'
+import type { InjuryEvent, Role } from './types'
 import { useQueryClient } from '@tanstack/react-query'
 import { useAlertReads, useEvents } from './queries'
 import { markAlertsRead } from './api/services'
 import { Badge, RiskBadge } from './ui'
+import { fmtVideo, identText } from './pages'
+
+/* ---------- identification updates ----------
+ * A fall saved as "Unidentified" and named a few seconds later (jersey, face, Gemini or staff)
+ * is an update. WhatsApp sends "Update: the earlier Unidentified fall was ...";
+ * the web shows the same as a pop-up and in the bell. */
+const LATE_ID_MS = 5000
+const idKey = (e: InjuryEvent) => `${e.id}:${e.identifiedAt}`
+export const identifiedLater = (e: InjuryEvent) =>
+  !!e.identified && !!e.identifiedAt && +new Date(e.identifiedAt) - +new Date(e.timestamp) > LATE_ID_MS
+const who = (e: InjuryEvent) => `${e.player.name ?? 'Unknown'}${e.player.jersey !== null ? ` (#${e.player.jersey})` : ''}`
+const timeOnly = (v: string | null) => (v ? new Date(v).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '')
+
+function UpdateText({ e }: { e: InjuryEvent }) {
+  const v = fmtVideo(e.videoTimeSec)
+  return (
+    <>
+      <p className="font-medium">The earlier Unidentified {e.eventType.toLowerCase()} was {who(e)}</p>
+      <p className="text-xs text-slate-500">Identified by: {identText(e) ?? '—'}{e.identifiedAt ? ` · ${timeOnly(e.identifiedAt)}` : ''}</p>
+      <p className="truncate text-xs text-slate-500">{e.matchName ?? 'No match'}{v ? ` · ${v} in video` : ''}</p>
+    </>
+  )
+}
 
 type N = { label: string; to: string; icon: LucideIcon }
 const common = (): N[] => [
@@ -45,6 +68,25 @@ export default function Layout() {
   const staff = !!user && user.role !== 'ADMIN' && !user.dev
   const reads = useAlertReads(staff)
   const qc = useQueryClient()
+
+  // identification updates, newest first
+  const updates = (events.data ?? []).filter(identifiedLater)
+    .sort((a, b) => +new Date(b.identifiedAt!) - +new Date(a.identifiedAt!))
+  // pop-ups only for updates that arrive while the page is open (not for old ones on first load)
+  const seen = useRef<Set<string> | null>(null)
+  const [popups, setPopups] = useState<InjuryEvent[]>([])
+  useEffect(() => {
+    if (!events.data) return
+    const later = events.data.filter(identifiedLater)
+    if (seen.current === null) { seen.current = new Set(later.map(idKey)); return }
+    const fresh = later.filter((e) => !seen.current!.has(idKey(e)))
+    if (!fresh.length) return
+    fresh.forEach((e) => seen.current!.add(idKey(e)))
+    setPopups((p) => [...fresh, ...p].slice(0, 3))
+    fresh.forEach((e) => setTimeout(() => setPopups((p) => p.filter((x) => idKey(x) !== idKey(e))), 15000))
+  }, [events.data])
+  const closePopup = (e: InjuryEvent) => setPopups((p) => p.filter((x) => idKey(x) !== idKey(e)))
+
   if (!user) return <Navigate to="/login" replace />
 
   const items = navFor(user.role)
@@ -118,6 +160,12 @@ export default function Layout() {
                     <li key={e.id}><Link to={`/events/${e.id}`} onClick={() => { setBell(false); markRead([e.id]) }} className="flex items-center justify-between gap-2 rounded-lg px-2 py-2 hover:bg-slate-50"><span className="truncate">{e.player.name ?? 'Unidentified'} · {e.region ?? '—'}</span><RiskBadge level={e.risk} /></Link></li>
                   ))}</ul>
                 )}
+                {updates.length > 0 && <>
+                  <p className="mt-3 flex items-center gap-1.5 border-t pt-3 font-semibold"><Info size={14} className="text-sky-600" />Player updates</p>
+                  <ul className="mt-1 divide-y divide-slate-100">{updates.slice(0, 3).map((e) => (
+                    <li key={idKey(e)}><Link to={`/events/${e.id}`} onClick={() => setBell(false)} className="block rounded-lg px-2 py-2 hover:bg-slate-50"><UpdateText e={e} /></Link></li>
+                  ))}</ul>
+                </>}
                 <button className="mt-2 inline-flex w-full items-center justify-center rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50" onClick={() => { setBell(false); nav(player ? '/player/events' : '/alerts') }}>{player ? 'View my injury events' : 'View all alerts'}</button>
                 {staff && high.length > 0 && <button className="mt-2 w-full text-center text-xs text-slate-500 underline hover:text-slate-700" onClick={() => markRead(high.map((e) => e.id))}>Mark all {high.length} as read</button>}
               </div>
@@ -130,6 +178,17 @@ export default function Layout() {
         </header>
         {user.dev && <div className="bg-amber-100 px-4 py-1.5 text-center text-xs font-semibold text-amber-900">DEV PREVIEW: not authenticated, no backend data. <Badge tone="amber">DEV DATA</Badge></div>}
         <main className="flex-1 p-4 md:p-6"><Outlet /></main>
+        {popups.length > 0 && (
+          <div className="fixed bottom-4 right-4 z-50 w-80 space-y-2" aria-live="polite">
+            {popups.map((e) => (
+              <div key={idKey(e)} className="flex gap-3 rounded-xl border border-sky-200 bg-white p-3 text-sm shadow-lg">
+                <Info size={18} className="mt-0.5 shrink-0 text-sky-600" />
+                <Link to={`/events/${e.id}`} onClick={() => closePopup(e)} className="min-w-0 flex-1"><p className="text-xs font-semibold uppercase text-sky-700">Player identified</p><UpdateText e={e} /></Link>
+                <button aria-label="Close" onClick={() => closePopup(e)} className="self-start text-slate-400 hover:text-slate-600"><X size={16} /></button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )

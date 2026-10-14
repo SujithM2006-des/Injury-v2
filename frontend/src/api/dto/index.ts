@@ -181,6 +181,8 @@ export interface DetectorProgressDto {
   started_at?: string | null
   finished_at?: string | null
   seconds_since_last_signal?: number | null
+  /** Unidentified falls of the running match that are still being identified (pct = search progress) */
+  identifying?: { event_id: number; pct: number }[]
 }
 
 /** GET /players/{id}/photos — reference photos in the known_players folder. */

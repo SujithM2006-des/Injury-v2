@@ -1880,8 +1880,36 @@ def mark_alerts_read(request: AlertReadRequest, current_user: User = Depends(get
 
 # ---------- detector progress for match pages (every role) ----------
 
+# An Unidentified fall keeps looking for its player for this long (in video time).
+# Same value as IDENTIFY_WINDOW_SECONDS in src/multi_player_injury.py.
+IDENTIFY_WINDOW_SEC = 120
+
+
+def _identifying_events(db, match_id, frame, fps):
+    """Unidentified falls of the running match that are still being identified,
+    with how far along the search is: [{"event_id": 12, "pct": 40}]."""
+    if not match_id or not frame or not fps:
+        return []
+    video_now = float(frame) / float(fps)
+    rows = (
+        db.query(InjuryEvent.id, InjuryEvent.video_time_sec)
+        .filter(
+            InjuryEvent.match_session_id == match_id,
+            InjuryEvent.player_id.is_(None),
+            InjuryEvent.video_time_sec.isnot(None),
+            InjuryEvent.video_time_sec >= video_now - IDENTIFY_WINDOW_SEC,
+        )
+        .all()
+    )
+    out = []
+    for event_id, t in rows:
+        pct = int(round(100 * max(0.0, video_now - float(t)) / IDENTIFY_WINDOW_SEC))
+        out.append({"event_id": event_id, "pct": max(1, min(99, pct))})
+    return out
+
+
 @app.get("/detector/status")
-def detector_progress(current_user: User = Depends(get_current_user)):
+def detector_progress(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
 
     status = _read_detector_status()
 
@@ -1901,8 +1929,16 @@ def detector_progress(current_user: User = Depends(get_current_user)):
     info = status.get("info") or {}
     progress = status.get("progress") or {}
 
+    identifying = []
+    if state in ("starting", "running"):
+        try:
+            identifying = _identifying_events(db, info.get("match_id"), progress.get("frame"), info.get("fps"))
+        except Exception as e:
+            print("[DETECTOR] Could not list falls being identified:", e)
+
     return {
         "state": state,
+        "identifying": identifying,
         "match_id": info.get("match_id"),
         "match_name": info.get("match_name"),
         "frame": progress.get("frame"),

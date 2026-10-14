@@ -68,6 +68,38 @@ const geminiDisagrees = (e: InjuryEvent) => {
   return !e.identified || e.gemini.jersey !== e.player.jersey
 }
 
+/* ---------- player identification in progress ----------
+ * While the detector runs, an Unidentified fall keeps looking for its player for 2 minutes of video.
+ * The backend reports how far that search is (GET /detector/status -> identifying). */
+export function useIdentifying() {
+  const d = useDetector()
+  const m = new Map<number, number>()
+  for (const x of d.data?.identifying ?? []) m.set(x.event_id, x.pct)
+  return m
+}
+
+/** "fall_test - 14 Oct 2026 13:54" -> "fall_test" (the date is when the run started, not when the fall happened) */
+export const matchShort = (name: string | null) => (name ? name.replace(/\s+-\s+\d{1,2} \w{3} \d{4} \d{1,2}:\d{2}$/, '') : null)
+/** When the fall was detected, e.g. "14 Oct, 05:17 pm" */
+export const fmtWhen = (v: string | null) => (v ? new Date(v).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—')
+
+/** Thin bar with "Identifying player… 42%" */
+export function IdentifyingBar({ pct }: { pct: number }) {
+  return (
+    <span className="inline-flex min-w-40 max-w-56 flex-1 flex-col gap-0.5 align-middle" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label="Identifying player">
+      <span className="flex items-center gap-1 text-xs font-medium text-sky-700"><Loader2 size={12} className="animate-spin" />Identifying player… {pct}%</span>
+      <span className="h-1.5 overflow-hidden rounded-full bg-slate-200"><span className="block h-1.5 rounded-full bg-sky-500 transition-all duration-700" style={{ width: `${pct}%` }} /></span>
+    </span>
+  )
+}
+
+/** Player name, the identifying bar while the search runs, or "Unidentified player" when it has ended */
+export function PlayerName({ e, ids, withJersey = true }: { e: InjuryEvent; ids: Map<number, number>; withJersey?: boolean }) {
+  if (e.player.name) return <>{e.player.name}{withJersey && e.player.jersey !== null ? ` #${e.player.jersey}` : ''}</>
+  const pct = ids.get(e.id)
+  return pct !== undefined ? <IdentifyingBar pct={pct} /> : <>Unidentified player</>
+}
+
 /** Gemini's possible injuries as one line, e.g. "Hamstring strain, Calf strain · rest 1-8+ weeks".
  *  Falls back to the detector's own note when Gemini has not reviewed the clip (yet). */
 export const injuryText = (e: InjuryEvent) =>
@@ -568,12 +600,13 @@ export function Login() {
 /* ---------- DASHBOARDS ---------- */
 export function EventLine({ e, to }: { e: InjuryEvent; to?: string }) {
   const g = geminiBadge(e)
+  const ids = useIdentifying()
   return (
     <li>
       <Link to={to ?? `/events/${e.id}`} className="flex items-center gap-3 rounded-lg px-2 py-2.5 hover:bg-slate-50">
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium">{e.player.name ? `${e.player.name} #${e.player.jersey ?? '?'}` : 'Unidentified player'}<span className="ml-2 text-slate-400">{e.eventType}</span></p>
-          <p className="truncate text-xs text-slate-500">{e.region ?? '—'} · {e.matchName ?? 'No match'}{fmtVideo(e.videoTimeSec) && ` · ${fmtVideo(e.videoTimeSec)} in video`}</p>
+          <p className="flex items-center gap-2 truncate text-sm font-medium"><PlayerName e={e} ids={ids} /><span className="text-slate-400">{e.eventType}</span></p>
+          <p className="truncate text-xs text-slate-500">{e.region ?? '—'} · {matchShort(e.matchName) ?? 'No match'}{fmtVideo(e.videoTimeSec) && ` · ${fmtVideo(e.videoTimeSec)} in video`} · detected {fmtWhen(e.timestamp)}</p>
           {e.aiInjury ? <p className="truncate text-xs text-slate-600" title={e.aiInjury.description ?? ''}><Sparkles size={11} className="mr-1 inline text-emerald-600" />{injuryText(e)}</p>
             : e.gemini.description && <p className="truncate text-xs text-slate-600" title={e.gemini.reason ?? ''}><Sparkles size={11} className="mr-1 inline text-emerald-600" />{e.gemini.description}</p>}
         </div>
@@ -903,6 +936,7 @@ export function ReportsPage() {
   const { user } = useAuth()
   const toast = useToast()
   const ev = useEvents()
+  const ids = useIdentifying()
   const matches = useMatches().data ?? []
   const [sp, setSp] = useSearchParams()
   const [busy, setBusy] = useState(false)
@@ -968,7 +1002,7 @@ export function ReportsPage() {
               {ev.isLoading && [0, 1, 2].map((i) => <tr key={i}><td colSpan={6} className="px-4 py-3"><Skeleton /></td></tr>)}
               {!ev.isLoading && !ev.isError && rows.map((e) => (
                 <tr key={e.id} className="border-t align-top hover:bg-slate-50">
-                  <td className="min-w-40 px-4 py-3"><p className="font-semibold">{playerText(e)}</p>{e.player.team && <p className="text-xs text-slate-500">{e.player.team}</p>}{!e.identified && <div className="mt-1"><Badge tone="amber">Unidentified</Badge></div>}</td>
+                  <td className="min-w-40 px-4 py-3"><p className="font-semibold"><PlayerName e={e} ids={ids} /></p>{e.player.team && <p className="text-xs text-slate-500">{e.player.team}</p>}{!e.identified && !ids.has(e.id) && <div className="mt-1"><Badge tone="amber">Unidentified</Badge></div>}</td>
                   <td className="px-4 py-3"><p className="font-medium">{e.eventType}</p><p className="text-xs text-slate-500">{e.region ?? 'Body area not recorded'}</p><Link to={`/events/${e.id}`} className={btnSm + ' mt-2'}><ExternalLink size={14} />Open #{e.id}</Link></td>
                   <td className="px-4 py-3"><RiskBadge level={e.risk} /></td>
                   <td className="max-w-72 px-4 py-3 text-slate-700">{e.aiInjury ? <><ul className="space-y-1">{e.aiInjury.injuries.map((i) => <li key={i.injury}><span className="font-medium">{i.injury}</span> <span className="text-xs text-slate-500">({i.bodyArea}{i.risk ? `, ${i.risk}` : ''})</span> <span className="text-xs text-slate-600">· rest {i.rest ?? '—'}</span></li>)}</ul>{e.aiInjury.rest && <p className="mt-1.5"><Badge tone="amber">Expected rest {e.aiInjury.rest}</Badge></p>}</> : noteText(e)}</td>
@@ -1336,6 +1370,7 @@ function MatchesTable({ q }: { q: string }) {
 /** Events and collisions list: #, Player, Injury, Safety measures, Time, Risk, Status (no Match column). */
 function EventsList({ collisions, q, risk, type, match, identity, filtered }: { collisions: boolean; q: string; risk: string; type: string; match: string; identity: string; filtered: boolean }) {
   const ev = useEvents()
+  const ids = useIdentifying()
   const { user } = useAuth()
   const nav = useNavigate()
   const [open, setOpen] = useState<number | null>(null)
@@ -1367,7 +1402,7 @@ function EventsList({ collisions, q, risk, type, match, identity, filtered }: { 
                   <td className="px-4 py-3 text-center"><span className="inline-grid h-7 min-w-7 place-items-center rounded-full bg-slate-100 px-1.5 text-xs font-bold text-slate-700">{i + 1}</span></td>
                   <td className="min-w-48 px-4 py-3">
                     {e.identified && e.player.playerId !== null ? <><PlayerToggle open={open === e.id} onClick={() => setOpen(open === e.id ? null : e.id)}>{e.player.name}{e.player.jersey !== null && <span className="ml-1 text-slate-400">#{e.player.jersey}</span>}</PlayerToggle>{e.player.team && <p className="text-xs text-slate-500">{e.player.team}</p>}</>
-                      : e.player.trackId !== null && <p className="text-xs text-slate-500">track {e.player.trackId}</p>}
+                      : <>{ids.has(e.id) && <IdentifyingBar pct={ids.get(e.id)!} />}{e.player.trackId !== null && <p className="text-xs text-slate-500">track {e.player.trackId}</p>}</>}
                     <div className="mt-1"><IdentityBadge s={e.player.identityStatus} label={identText(e)} title={e.idDetail ?? ''} /></div>
                     {user && canAssign(user.role, e) && <button className={btnSm + ' mt-2'} onClick={() => nav(`${base}/${e.id}`)}>{e.identified ? 'Change player' : e.clipUrl ? 'Review clip & identify' : 'Assign player'}</button>}
                   </td>
@@ -1564,6 +1599,7 @@ export function EventDetail({ collision = false }: { collision?: boolean }) {
   const { id } = useParams()
   const { user } = useAuth()
   const ev = useEvents()
+  const ids = useIdentifying()
   const [saved, setSaved] = useState<InjuryEvent | null>(null)
   const fromList = (ev.data ?? []).find((e) => String(e.id) === id)
   // After a coach names a player from the other team, the event leaves their list: keep showing what was saved.
@@ -1591,7 +1627,7 @@ export function EventDetail({ collision = false }: { collision?: boolean }) {
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         <Card>
           <p className="text-xs font-semibold uppercase text-slate-500">{collision ? 'Player A' : 'Player'}</p>
-          <p className="mt-1 text-lg font-bold">{e.player.name ?? 'Unknown Player'}</p>
+          <p className="mt-1 text-lg font-bold">{e.player.name ?? (ids.has(e.id) ? <IdentifyingBar pct={ids.get(e.id)!} /> : 'Unknown Player')}</p>
           <div className="mt-1"><IdentityBadge s={e.player.identityStatus} label={identText(e)} /></div>
           <dl className="mt-3 grid grid-cols-2 gap-2 text-sm">
             <dt className="text-slate-500">Player ID</dt><dd><Na v={e.player.playerId} /></dd>
@@ -1734,6 +1770,7 @@ export function Alerts() {
   return user && user.role !== 'ADMIN' && !user.dev ? <StaffAlerts /> : <AdminAlerts />
 }
 function AdminAlerts() {
+  const ids = useIdentifying()
   const [pri, setPri] = useState('All')
   const [read, setRead] = useState('All')
   const toast = useToast()
@@ -1751,7 +1788,7 @@ function AdminAlerts() {
             <li key={e.id} className={!e.resolved ? 'bg-sky-50/40' : ''}>
               <Link to={`/events/${e.id}`} className="flex items-start gap-3 px-4 py-3 hover:bg-slate-50">
                 {!e.resolved && <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-sky-500" aria-label="Unread" />}
-                <div className="min-w-0 flex-1"><p className="text-sm font-medium">{e.player.name ?? 'Unidentified player'} · {e.eventType} · {e.region ?? '—'}</p><p className="truncate text-xs text-slate-500">{injuryText(e) ?? ''}</p><p className="text-xs text-slate-400">{fmtDate(e.timestamp)}{e.matchName ? ` · ${e.matchName}` : ''}</p></div>
+                <div className="min-w-0 flex-1"><p className="flex flex-wrap items-center gap-x-1 text-sm font-medium"><PlayerName e={e} ids={ids} withJersey={false} /> · {e.eventType} · {e.region ?? '—'}</p><p className="truncate text-xs text-slate-500">{injuryText(e) ?? ''}</p><p className="text-xs text-slate-400">{fmtDate(e.timestamp)}{e.matchName ? ` · ${e.matchName}` : ''}</p></div>
                 <RiskBadge level={e.risk} />
               </Link>
             </li>
@@ -1997,6 +2034,7 @@ function AssessmentCard({ e, a, loading }: { e: InjuryEvent; a: AssessmentDto | 
 /* ---------- alerts with a per-user read state ---------- */
 function StaffAlerts() {
   const { user } = useAuth()
+  const ids = useIdentifying()
   const [pri, setPri] = useState('All')
   const [read, setRead] = useState('All')
   const [busy, setBusy] = useState(false)
@@ -2033,7 +2071,7 @@ function StaffAlerts() {
               <li key={e.id} className={isUnread ? 'bg-sky-50/40' : ''}>
                 <Link to={`/events/${e.id}`} onClick={() => open(e.id)} className="flex items-start gap-3 px-4 py-3 hover:bg-slate-50">
                   <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${isUnread ? 'bg-sky-500' : 'bg-transparent'}`} aria-label={isUnread ? 'Unread' : 'Read'} />
-                  <div className="min-w-0 flex-1"><p className={`text-sm ${isUnread ? 'font-semibold' : 'font-medium text-slate-700'}`}>{e.player.name ?? 'Unidentified player'} · {e.eventType} · {e.region ?? '—'}</p><p className="truncate text-xs text-slate-500">{injuryText(e) ?? ''}</p><p className="text-xs text-slate-400">{fmtDate(e.timestamp)}{e.matchName ? ` · ${e.matchName}` : ''}{e.resolved ? ' · reviewed by medical staff' : ''}</p></div>
+                  <div className="min-w-0 flex-1"><p className={`flex flex-wrap items-center gap-x-1 text-sm ${isUnread ? 'font-semibold' : 'font-medium text-slate-700'}`}><PlayerName e={e} ids={ids} withJersey={false} /> · {e.eventType} · {e.region ?? '—'}</p><p className="truncate text-xs text-slate-500">{injuryText(e) ?? ''}</p><p className="text-xs text-slate-400">{fmtDate(e.timestamp)}{e.matchName ? ` · ${e.matchName}` : ''}{e.resolved ? ' · reviewed by medical staff' : ''}</p></div>
                   <RiskBadge level={e.risk} />
                 </Link>
               </li>
