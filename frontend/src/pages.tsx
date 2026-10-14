@@ -30,7 +30,7 @@ const METHOD_LABELS: Record<string, string> = {
   jersey_history: 'Jersey (before fall)',
   jersey_handoff: 'Jersey (tracked)',
   face: 'Face',
-  gemini: 'Gemini (jersey)',
+  gemini: 'Jersey number (clip review)',
   manual: 'Manual',
 }
 
@@ -51,7 +51,12 @@ export const fmtVideo = (s: number | null) => {
 export const fmtDate = (v: string | null) => (v ? new Date(v).toLocaleString(undefined, dateOptions()) : '—')
 const fileName = (p: string | null) => (p ? p.split(/[\\/]/).pop() ?? p : '—')
 
+/** Gemini works only in the background: no Gemini badge, verdict or confidence is shown anywhere.
+ *  Set to true to show "Gemini: real fall · 95%" badges again. */
+const SHOW_GEMINI = false
+
 const geminiBadge = (e: InjuryEvent): { text: string; tone: Tone } | null => {
+  if (!SHOW_GEMINI) return null
   const v = e.gemini.verdict
   // the injury check's yes/no decision is not shown: only its possible injuries and rest
   if (!v || e.aiInjury || v === 'jersey_only') return null
@@ -64,6 +69,7 @@ const geminiBadge = (e: InjuryEvent): { text: string; tone: Tone } | null => {
 
 /** Gemini read a different shirt number than the stored player */
 const geminiDisagrees = (e: InjuryEvent) => {
+  if (!SHOW_GEMINI) return false
   if (e.gemini.jersey === null || e.identifiedBy === 'gemini') return false
   return !e.identified || e.gemini.jersey !== e.player.jersey
 }
@@ -1588,9 +1594,9 @@ const DEMO_CONFIDENCE = true
 
 function ModelConfidence({ e }: { e: InjuryEvent }) {
   const real = e.gemini.confidence !== null ? Math.round(e.gemini.confidence * 100) : null
-  if (!DEMO_CONFIDENCE || (real !== null && real >= 80)) return <Na v={real !== null ? `Gemini ${real}%` : null} />
+  if (!DEMO_CONFIDENCE || (real !== null && real >= 80)) return <Na v={real !== null ? `${real}%` : null} />
   const shown = 80 + (e.id % 6)
-  return <span title={`Real value: ${real !== null ? `${real}%` : 'not checked by Gemini yet'}. Shown as 80-85% for the demo.`}>{shown}% <span className="ml-1 rounded bg-slate-100 px-1 text-[10px] font-semibold uppercase text-slate-500">demo</span></span>
+  return <span title={`Real value: ${real !== null ? `${real}%` : 'not checked yet'}. Shown as 80-85% for the demo.`}>{shown}% <span className="ml-1 rounded bg-slate-100 px-1 text-[10px] font-semibold uppercase text-slate-500">demo</span></span>
 }
 
 const Row = ({ label, children }: { label: string; children: ReactNode }) => <div className="flex justify-between gap-4"><dt>{label}</dt><dd className="text-right">{children}</dd></div>
@@ -1742,7 +1748,7 @@ export function Assessment() {
       <div className="mb-4"><Disclaimer /></div>
       {e && <Card className="mb-4"><p className="text-sm"><b>{e.player.name ?? 'Unidentified player'}</b> · {e.eventType} · {e.region ?? '—'} · <RiskBadge level={e.risk} /></p>{e.aiInjury ? <div className="mt-3"><PossibleInjuries e={e} /></div> : (e.injuryNote || e.note) && <p className="mt-1 text-sm text-slate-600">{e.injuryNote ?? e.note}</p>}<div className="mt-3"><SafetyMeasures eventType={e.eventType} region={e.region} risk={e.risk} /></div></Card>}
       {!e && !ev.isLoading ? (
-        <Card><EmptyState title="Incident not found" text={ev.isError ? normalizeApiError(ev.error) : 'It may have been deleted (for example by Gemini as a false alarm).'} action={<Link className={btnS} to="/events">Back to events</Link>} /></Card>
+        <Card><EmptyState title="Incident not found" text={ev.isError ? normalizeApiError(ev.error) : 'It may have been deleted.'} action={<Link className={btnS} to="/events">Back to events</Link>} /></Card>
       ) : (
         <Card>
           {user?.dev && <p className="mb-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-900">Developer preview: log in with a medical account to save assessments.</p>}
