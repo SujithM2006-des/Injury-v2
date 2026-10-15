@@ -44,6 +44,24 @@ export interface AiInjury {
   checkedAt: string | null
 }
 
+/** Detailed medical recommendation from the clip: tests, treatment, specialist, return to play. */
+export interface AiTreatment {
+  mechanism: string | null
+  bodyPart: string | null
+  side: string | null
+  severity: string | null
+  urgency: string | null
+  confidence: number | null
+  injuries: { injury: string; likelihood: number | null; why: string | null }[]
+  onField: string[]
+  tests: { test: string; why: string | null }[]
+  treatment: string[]
+  specialist: string | null
+  redFlags: string[]
+  returnToPlay: string | null
+  checkedAt: string | null
+}
+
 /** One injury event (AI-detected fall or staff-logged event). */
 export interface InjuryEvent {
   id: number
@@ -67,6 +85,7 @@ export interface InjuryEvent {
   videoTimeSec: number | null
   gemini: GeminiInfo
   aiInjury: AiInjury | null
+  aiTreatment: AiTreatment | null
 }
 
 export interface Player {

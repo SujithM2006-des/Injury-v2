@@ -505,6 +505,32 @@ def _ai_injury_for(event_id):
     return _ai_injury_all().get(str(event_id))
 
 
+# Medical recommendation per event (src/gemini_treatment.py, KEY 3): tests, treatment,
+# specialist, red flags, return to play. Kept in output/ai_treatment.json (no database change).
+AI_TREATMENT_FILE = os.path.join(PROJECT_ROOT, "output", "ai_treatment.json")
+_ai_treatment_cache = {"mtime": None, "data": {}}
+
+
+def _ai_treatment_all():
+    try:
+        st = os.stat(AI_TREATMENT_FILE)
+        mtime = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return {}
+    if _ai_treatment_cache["mtime"] != mtime:
+        try:
+            with open(AI_TREATMENT_FILE, "r", encoding="utf-8") as f:
+                _ai_treatment_cache["data"] = _json.load(f)
+        except (OSError, ValueError):
+            _ai_treatment_cache["data"] = {}
+        _ai_treatment_cache["mtime"] = mtime
+    return _ai_treatment_cache["data"]
+
+
+def _ai_treatment_for(event_id):
+    return _ai_treatment_all().get(str(event_id))
+
+
 # ============================================
 # SERIALIZER
 # ============================================
@@ -533,6 +559,7 @@ def event_to_dict(e: InjuryEvent):
         "gemini_jersey_confidence": e.gemini_jersey_confidence,
         "gemini_checked_at": e.gemini_checked_at,
         "ai_injury": _ai_injury_for(e.id),
+        "ai_treatment": _ai_treatment_for(e.id),
         "match_session_id": e.match_session_id,
         "match_name": (e.match.name if e.match is not None and e.match.name else
                        ("Match #" + str(e.match_session_id) if e.match_session_id else None)),
@@ -938,6 +965,94 @@ def ai_injury_result(event_id: int, request: AiInjuryRequest, db: Session = Depe
     _save_json(AI_INJURY_FILE, data)
 
     print("[INJURY-AI] event", event_id, "->", ", ".join(i["injury"] for i in injuries), "| rest", record["rest"])
+
+    return {"action": "stored", "event": event_to_dict(event)}
+
+
+# ============================================
+# EVENTS — MEDICAL RECOMMENDATION (sent by src/gemini_treatment.py, KEY 3)
+# Detailed review of the clip: mechanism, likely injuries, on-field safety measures,
+# recommended tests (CT / MRI / X-ray ...), treatment, specialist, red flags and return
+# to play. Stored in output/ai_treatment.json. Never deletes anything.
+# ============================================
+
+AI_TREATMENT_SEVERITIES = ("Low", "Medium", "High", "Critical")
+AI_TREATMENT_URGENCIES = ("Emergency", "Same day", "Within 48 hours", "Routine")
+
+
+class AiTreatmentInjury(BaseModel):
+    injury: str
+    likelihood: Optional[float] = None
+    why: Optional[str] = None
+
+
+class AiTreatmentTest(BaseModel):
+    test: str
+    why: Optional[str] = None
+
+
+class AiTreatmentRequest(BaseModel):
+    mechanism: Optional[str] = None
+    body_part: Optional[str] = None
+    side: Optional[str] = None
+    severity: Optional[str] = None
+    urgency: Optional[str] = None
+    confidence: Optional[float] = None
+    injuries: list[AiTreatmentInjury] = []
+    on_field: list[str] = []
+    tests: list[AiTreatmentTest] = []
+    treatment: list[str] = []
+    specialist: Optional[str] = None
+    red_flags: list[str] = []
+    return_to_play: Optional[str] = None
+    model: Optional[str] = None
+
+
+def _clip_list(items, n_items, n_chars):
+    return [t for t in (_clip_text(i, n_chars) for i in (items or [])[:n_items]) if t]
+
+
+@app.patch("/events/{event_id}/ai-treatment")
+def ai_treatment_result(event_id: int, request: AiTreatmentRequest, db: Session = Depends(get_db)):
+
+    event = db.query(InjuryEvent).filter(InjuryEvent.id == event_id).first()
+
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    record = {
+        "mechanism": _clip_text(request.mechanism, 400),
+        "body_part": _clip_text(request.body_part, 60),
+        "side": request.side if request.side in ("left", "right") else None,
+        "severity": request.severity if request.severity in AI_TREATMENT_SEVERITIES else None,
+        "urgency": request.urgency if request.urgency in AI_TREATMENT_URGENCIES else None,
+        "confidence": max(0.0, min(1.0, request.confidence)) if request.confidence is not None else None,
+        "injuries": [
+            {"injury": _clip_text(i.injury, 80),
+             "likelihood": max(0.0, min(1.0, i.likelihood)) if i.likelihood is not None else None,
+             "why": _clip_text(i.why, 200)}
+            for i in request.injuries[:3] if _clip_text(i.injury, 80)
+        ],
+        "on_field": _clip_list(request.on_field, 6, 160),
+        "tests": [{"test": _clip_text(t.test, 100), "why": _clip_text(t.why, 200)}
+                  for t in request.tests[:5] if _clip_text(t.test, 100)],
+        "treatment": _clip_list(request.treatment, 6, 160),
+        "specialist": _clip_text(request.specialist, 120),
+        "red_flags": _clip_list(request.red_flags, 5, 120),
+        "return_to_play": _clip_text(request.return_to_play, 200),
+        "model": _clip_text(request.model, 60),
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    if not (record["injuries"] or record["tests"] or record["on_field"]):
+        raise HTTPException(status_code=400, detail="Nothing to store")
+
+    data = dict(_load_json(AI_TREATMENT_FILE, {}))
+    data[str(event_id)] = record
+    _save_json(AI_TREATMENT_FILE, data)
+
+    print("[TREATMENT-AI] event", event_id, "->", record["severity"], "/", record["urgency"],
+          "| tests:", ", ".join(t["test"] for t in record["tests"]) or "-")
 
     return {"action": "stored", "event": event_to_dict(event)}
 

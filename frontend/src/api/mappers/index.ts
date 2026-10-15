@@ -69,6 +69,22 @@ export function toEvent(e: EventDto): InjuryEvent {
       injuries: e.ai_injury.injuries.map((i) => ({ injury: i.injury, bodyArea: i.body_area, risk: i.risk ?? null, safetyMeasure: i.safety_measure ?? null, rest: i.rest ?? null, likelihood: i.likelihood ?? null })),
       checkedAt: e.ai_injury.checked_at ?? null,
     } : null,
+    aiTreatment: e.ai_treatment ? {
+      mechanism: e.ai_treatment.mechanism ?? null,
+      bodyPart: e.ai_treatment.body_part ?? null,
+      side: e.ai_treatment.side ?? null,
+      severity: e.ai_treatment.severity ?? null,
+      urgency: e.ai_treatment.urgency ?? null,
+      confidence: e.ai_treatment.confidence ?? null,
+      injuries: (e.ai_treatment.injuries ?? []).map((i) => ({ injury: i.injury, likelihood: i.likelihood ?? null, why: i.why ?? null })),
+      onField: e.ai_treatment.on_field ?? [],
+      tests: (e.ai_treatment.tests ?? []).map((t) => ({ test: t.test, why: t.why ?? null })),
+      treatment: e.ai_treatment.treatment ?? [],
+      specialist: e.ai_treatment.specialist ?? null,
+      redFlags: e.ai_treatment.red_flags ?? [],
+      returnToPlay: e.ai_treatment.return_to_play ?? null,
+      checkedAt: e.ai_treatment.checked_at ?? null,
+    } : null,
   }
 }
 

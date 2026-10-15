@@ -29,6 +29,7 @@ export interface EventDto {
   gemini_team: string | null
   gemini_jersey_confidence: number | null
   ai_injury?: AiInjuryDto | null
+  ai_treatment?: AiTreatmentDto | null
   match_session_id: number | null
   match_name: string | null
   event_type: string
@@ -62,6 +63,25 @@ export interface AiInjuryDto {
   injuries: AiInjuryItemDto[]
   rest: string | null
   risk: string | null
+  model: string | null
+  checked_at: string | null
+}
+
+/** Medical recommendation (src/gemini_treatment.py, KEY 3): tests, treatment, specialist, return to play */
+export interface AiTreatmentDto {
+  mechanism: string | null
+  body_part: string | null
+  side: string | null
+  severity: string | null
+  urgency: string | null
+  confidence: number | null
+  injuries: { injury: string; likelihood: number | null; why: string | null }[]
+  on_field: string[]
+  tests: { test: string; why: string | null }[]
+  treatment: string[]
+  specialist: string | null
+  red_flags: string[]
+  return_to_play: string | null
   model: string | null
   checked_at: string | null
 }

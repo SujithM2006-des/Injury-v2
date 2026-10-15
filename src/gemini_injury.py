@@ -15,6 +15,9 @@ For each remaining fall (background thread, never slows detection):
   - Stored through the backend (PATCH /events/{id}/ai-injury -> output/ai_injury.json),
     shown on the dashboard, and sent as a WhatsApp follow-up.
 
+After this check, every remaining fall is handed to KEY 3 (gemini_treatment.py, own key
+GEMINI_TREATMENT_API_KEY) for the detailed medical recommendation (tests, treatment).
+
 Any error = event left exactly as it is (fails safe).
 
 Interface used by multi_player_injury.py:
@@ -33,6 +36,12 @@ import requests
 from dotenv import load_dotenv
 
 import injury_catalog
+
+try:
+    import gemini_treatment          # KEY 3 - optional; missing file = no medical recommendation
+except Exception as _e:
+    gemini_treatment = None
+    print("[TREATMENT-AI] gemini_treatment.py not loaded - medical recommendation off:", _e)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -470,11 +479,22 @@ def _process(job):
         print(f"[INJURY-AI] #{event_id} skipped - removed as fake / duplicate.")
         return
 
+    hints = []
+    try:
+        _injury_check(event_id, frames, target_index, box, context, hints)
+    finally:
+        # KEY 3: detailed medical recommendation (tests, treatment) - also when this check failed
+        if gemini_treatment is not None:
+            gemini_treatment.submit(ids, frames, target_index, box, context, hints)
+
+
+def _injury_check(event_id, frames, target_index, box, context, hints):
     images = _build_images(frames, target_index, box)
     if not images:
         return
 
     result = interpret(_ask(images, context))
+    hints.extend(i["injury"] for i in result["injuries"])
     stats["checked"] += 1
 
     print(f"[INJURY-AI] #{event_id}: injury={result['injury_event']} ({result['confidence']:.2f}) | "

@@ -1687,6 +1687,7 @@ export function EventDetail({ collision = false }: { collision?: boolean }) {
           <div className="mt-3"><SafetyMeasures eventType={e.eventType} region={e.region} risk={e.risk} /></div>
           <p className="mt-2 text-sm font-semibold">AI-suggested screening categories, NOT a confirmed diagnosis.</p>
         </Card>
+        <MedicalRecommendation e={e} />
         <Card>
           <h2 className="font-semibold">Related</h2>
           {others.length === 0 ? <><p className="mt-2 text-sm text-slate-500">Related {collision ? 'injury event' : 'collision'}: none reported</p><p className="text-sm text-slate-500">Related alert: none reported</p></>
@@ -1694,6 +1695,74 @@ export function EventDetail({ collision = false }: { collision?: boolean }) {
         </Card>
       </div>
     </>
+  )
+}
+
+/* ---------- MEDICAL RECOMMENDATION (KEY 3, src/gemini_treatment.py) ---------- */
+const URGENCY_TONE: Record<string, Tone> = { Emergency: 'red', 'Same day': 'amber', 'Within 48 hours': 'blue', Routine: 'green' }
+const REC_SEVERITY_TONE: Record<string, Tone> = { Critical: 'red', High: 'red', Medium: 'amber', Low: 'green' }
+
+function RecList({ title, items }: { title: string; items: string[] }) {
+  if (!items.length) return null
+  return (
+    <div>
+      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</p>
+      <ul className="mt-1 list-disc space-y-0.5 pl-5 text-sm text-slate-800">{items.map((t) => <li key={t}>{t}</li>)}</ul>
+    </div>
+  )
+}
+
+/** Tests, treatment, specialist, red flags and return to play for one fall (shown on the event page). */
+export function MedicalRecommendation({ e }: { e: InjuryEvent }) {
+  const t = e.aiTreatment
+  if (!t) return null
+  return (
+    <Card className="md:col-span-2 xl:col-span-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="flex items-center gap-2 font-semibold"><HeartPulse size={18} className="text-rose-600" />Medical recommendation</h2>
+        {t.severity && <Badge tone={REC_SEVERITY_TONE[t.severity] ?? 'gray'}>Severity: {t.severity}</Badge>}
+        {t.urgency && <Badge tone={URGENCY_TONE[t.urgency] ?? 'gray'}>Urgency: {t.urgency}</Badge>}
+        {t.bodyPart && <span className="text-sm font-medium text-slate-600">{t.bodyPart}</span>}
+      </div>
+      {t.mechanism && <p className="mt-2 text-sm text-slate-700"><b>Mechanism:</b> {t.mechanism}</p>}
+      <div className="mt-3 grid gap-4 md:grid-cols-2">
+        {t.injuries.length > 0 && (
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Likely injuries</p>
+            <ul className="mt-1 space-y-1.5">{t.injuries.map((i) => (
+              <li key={i.injury} className="rounded-lg bg-slate-50 px-2.5 py-1.5 text-sm">
+                <span className="font-semibold">{i.injury}</span>{i.likelihood !== null && <span className="ml-2 text-xs text-slate-500">{Math.round(i.likelihood * 100)}%</span>}
+                {i.why && <p className="text-xs text-slate-600">{i.why}</p>}
+              </li>
+            ))}</ul>
+          </div>
+        )}
+        <RecList title="On the pitch now" items={t.onField} />
+        {t.tests.length > 0 && (
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Recommended tests</p>
+            <ul className="mt-1 space-y-1.5">{t.tests.map((x) => (
+              <li key={x.test} className="rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-1.5 text-sm">
+                <span className="font-semibold text-sky-900">{x.test}</span>
+                {x.why && <p className="text-xs text-sky-800">{x.why}</p>}
+              </li>
+            ))}</ul>
+          </div>
+        )}
+        <RecList title="Treatment" items={t.treatment} />
+        {t.redFlags.length > 0 && (
+          <div className="rounded-lg border border-red-200 bg-red-50 p-2.5">
+            <p className="text-xs font-semibold uppercase tracking-wide text-red-800">Red flags - emergency care if</p>
+            <ul className="mt-1 list-disc space-y-0.5 pl-5 text-sm text-red-900">{t.redFlags.map((x) => <li key={x}>{x}</li>)}</ul>
+          </div>
+        )}
+        <div className="space-y-1 text-sm">
+          {t.specialist && <p><b>Specialist:</b> {t.specialist}</p>}
+          {t.returnToPlay && <p><b>Return to play:</b> {t.returnToPlay}</p>}
+        </div>
+      </div>
+      <p className="mt-3 text-xs font-semibold text-slate-600">AI decision support from the clip, NOT a diagnosis. A qualified medical professional must confirm every test and treatment.</p>
+    </Card>
   )
 }
 
