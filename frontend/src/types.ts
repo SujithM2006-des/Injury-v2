@@ -1,4 +1,4 @@
-export type Role = 'ADMIN' | 'MEDICAL' | 'COACH' | 'PLAYER'
+export type Role = 'ADMIN' | 'MEDICAL' | 'COACH' | 'PLAYER' | 'OWNER'
 export type IdentityStatus = 'CONFIRMED' | 'UNCERTAIN' | 'UNKNOWN'
 export type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH'
 

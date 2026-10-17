@@ -10,7 +10,7 @@ interface Ctx { user: User | null; login: (u: string, p: string) => Promise<User
 
 const C = createContext<Ctx>(null as unknown as Ctx)
 export const useAuth = () => useContext(C)
-export const home: Record<Role, string> = { ADMIN: '/admin/dashboard', COACH: '/coach/dashboard', MEDICAL: '/medical/dashboard', PLAYER: '/player/dashboard' }
+export const home: Record<Role, string> = { ADMIN: '/admin/dashboard', COACH: '/coach/dashboard', MEDICAL: '/medical/dashboard', PLAYER: '/player/dashboard', OWNER: '/owner/dashboard' }
 
 const USER_KEY = 'athleteguard_user'
 

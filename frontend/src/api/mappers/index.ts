@@ -7,7 +7,7 @@ export const unknownPlayer: PlayerRef = { trackId: null, playerId: null, name: n
 
 export const toRole = (r: string): Role => {
   const v = r.toUpperCase()
-  return v === 'ADMIN' ? 'ADMIN' : v === 'MEDICAL' ? 'MEDICAL' : v === 'PLAYER' ? 'PLAYER' : 'COACH'
+  return v === 'ADMIN' ? 'ADMIN' : v === 'MEDICAL' ? 'MEDICAL' : v === 'PLAYER' ? 'PLAYER' : v === 'OWNER' ? 'OWNER' : 'COACH'
 }
 
 const toRisk = (r: string | null): RiskLevel | null => {

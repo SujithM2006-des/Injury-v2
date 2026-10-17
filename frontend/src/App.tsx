@@ -17,7 +17,7 @@ const RoleHome = () => {
   const { user } = useAuth()
   return user ? <Navigate to={home[user.role]} replace /> : <Navigate to="/login" replace />
 }
-const ALL: Role[] = ['ADMIN', 'MEDICAL', 'COACH']
+const ALL: Role[] = ['ADMIN', 'MEDICAL', 'COACH', 'OWNER']
 
 export default function App() {
   return (
@@ -32,6 +32,7 @@ export default function App() {
                 <Route path="/admin/dashboard" element={<G roles={['ADMIN']}><P.Dashboard role="ADMIN" /></G>} />
                 <Route path="/coach/dashboard" element={<G roles={['COACH']}><P.Dashboard role="COACH" /></G>} />
                 <Route path="/medical/dashboard" element={<G roles={['MEDICAL']}><P.Dashboard role="MEDICAL" /></G>} />
+                <Route path="/owner/dashboard" element={<G roles={['OWNER']}><P.Dashboard role="OWNER" /></G>} />
                 <Route path="/teams" element={<G roles={ALL}><P.ListPage k="teams" /></G>} />
                 <Route path="/teams/:id" element={<G roles={ALL}><P.Detail k="teams" /></G>} />
                 <Route path="/players" element={<G roles={ALL}><P.ListPage k="players" /></G>} />
@@ -53,8 +54,8 @@ export default function App() {
                 <Route path="/alerts" element={<G roles={ALL}><P.Alerts /></G>} />
                 <Route path="/reports" element={<G roles={ALL}><P.ListPage k="reports" /></G>} />
                 <Route path="/reports/:id" element={<G roles={ALL}><P.Detail k="reports" /></G>} />
-                <Route path="/admin/users" element={<G roles={['ADMIN']}><P.ListPage k="users" /></G>} />
-                <Route path="/admin/system" element={<G roles={['ADMIN']}><P.System /></G>} />
+                <Route path="/admin/users" element={<G roles={['ADMIN', 'OWNER']}><P.ListPage k="users" /></G>} />
+                <Route path="/admin/system" element={<G roles={['ADMIN', 'OWNER']}><P.System /></G>} />
                 <Route path="/settings" element={<P.Settings />} />
                 <Route path="/help" element={<P.Help />} />
                 <Route path="/offline" element={<P.ErrorPage kind="network" />} />

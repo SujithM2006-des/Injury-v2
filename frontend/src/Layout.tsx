@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, NavLink, Navigate, Outlet, useNavigate } from 'react-router-dom'
-import { LayoutDashboard, Users, Shield, CalendarDays, Activity, Zap, Bell, FileText, UserCog, Server, Settings, Menu, PanelLeft, Search, LogOut, HelpCircle, ChevronDown, UserRound, History, Info, X, type LucideIcon } from 'lucide-react'
+import { LayoutDashboard, Users, Shield, Video, Activity, Zap, Bell, FileText, UserCog, Server, Settings, Menu, PanelLeft, Search, LogOut, HelpCircle, ChevronDown, UserRound, History, Info, X, type LucideIcon } from 'lucide-react'
 import { useAuth, home } from './auth'
 import type { InjuryEvent, Role } from './types'
 import { useQueryClient } from '@tanstack/react-query'
 import { useAlertReads, useEvents } from './queries'
 import { markAlertsRead } from './api/services'
-import { Badge, RiskBadge } from './ui'
+import { Badge, Logo, LogoMark, RiskBadge } from './ui'
 import { fmtVideo, identText } from './pages'
 
 /* ---------- identification updates ----------
@@ -34,8 +34,8 @@ function UpdateText({ e }: { e: InjuryEvent }) {
 type N = { label: string; to: string; icon: LucideIcon }
 const common = (): N[] => [
   { label: 'Players', to: '/players', icon: Users },
-  { label: 'Matches', to: '/matches', icon: CalendarDays },
-  { label: 'Events', to: '/events', icon: Activity },
+  { label: 'Match Analysis', to: '/matches', icon: Video },
+  { label: 'Injury Events', to: '/events', icon: Activity },
   { label: 'Collisions', to: '/collisions', icon: Zap },
   { label: 'Alerts', to: '/alerts', icon: Bell },
 ]
@@ -43,15 +43,19 @@ export const navFor = (r: Role): N[] => {
   const dash: N = { label: 'Dashboard', to: home[r], icon: LayoutDashboard }
   const set: N = { label: 'Settings', to: '/settings', icon: Settings }
   const rep: N = { label: 'Reports', to: '/reports', icon: FileText }
-  // Admin menu: no Players, Matches or Collisions. Players live inside "Teams & Players";
-  // the other pages still open from links inside events.
+  // Menu: Injury Events, Teams & Players, Alerts. Players live inside "Teams & Players";
+  // Match Analysis and Collisions are not in the menu (they still open from links inside events).
   const adminCommon = common().filter((i) => i.to !== '/players' && i.to !== '/matches' && i.to !== '/collisions')
+  // Injury Events, Teams & Players, Alerts
+  const main = (teamsLabel: string): N[] => [adminCommon[0], { label: teamsLabel, to: '/teams', icon: Shield }, ...adminCommon.slice(1)]
   // Player: only their own pages
   if (r === 'PLAYER') return [dash, { label: 'Profile', to: '/player/profile', icon: UserRound }, { label: 'History', to: '/player/history', icon: History }, { label: 'Events', to: '/player/events', icon: Activity }, { label: 'Reports', to: '/player/reports', icon: FileText }]
-  if (r === 'ADMIN') return [dash, { label: 'Teams & Players', to: '/teams', icon: Shield }, ...adminCommon, rep, { label: 'Users', to: '/admin/users', icon: UserCog }, { label: 'System', to: '/admin/system', icon: Server }, set]
+  if (r === 'ADMIN') return [dash, ...main('Teams & Players'), rep, { label: 'Users', to: '/admin/users', icon: UserCog }, { label: 'System', to: '/admin/system', icon: Server }, set]
+  // Team owner: the admin menu, limited to their own team (the pages themselves only show that team)
+  if (r === 'OWNER') return [dash, ...main('Team & Players'), rep, { label: 'Users', to: '/admin/users', icon: UserCog }, { label: 'System', to: '/admin/system', icon: Server }, set]
   // Medical staff and coaches: same short menu as admin (Players, Matches and Collisions are reached from
   // inside "Team & Players" and the events), plus Reports.
-  return [dash, { label: r === 'COACH' ? 'Team & Players' : 'Teams & Players', to: '/teams', icon: Shield }, ...adminCommon, rep, set]
+  return [dash, ...main(r === 'COACH' ? 'Team & Players' : 'Teams & Players'), rep, set]
 }
 
 export default function Layout() {
@@ -103,31 +107,28 @@ export default function Layout() {
   }
   const search = (e: FormEvent) => { e.preventDefault(); nav(`/events?q=${encodeURIComponent(q)}`) }
 
-  const ROLE_NAME: Record<Role, string> = { ADMIN: 'Administrator', MEDICAL: 'Medical staff', COACH: 'Coach', PLAYER: 'Player' }
+  const ROLE_NAME: Record<Role, string> = { ADMIN: 'Administrator', MEDICAL: 'Medical staff', COACH: 'Coach', PLAYER: 'Player', OWNER: 'Team owner' }
   const player = user.role === 'PLAYER'
   const side = (mobile: boolean) => {
     const wide = mobile || !collapsed
-    const link = (isActive: boolean) => `group relative flex items-center gap-3 rounded-xl ${wide ? 'px-4' : 'justify-center px-0'} py-3 text-[15px] font-medium transition ${isActive ? 'bg-sky-500/20 text-white' : 'text-slate-300 hover:bg-white/10 hover:text-white'}`
+    const link = (isActive: boolean) => `group relative flex items-center gap-3 rounded-xl ${wide ? 'px-3.5' : 'justify-center px-0'} py-2.5 text-sm font-medium transition ${isActive ? 'bg-brand-600 text-white shadow-lg shadow-brand-600/30' : 'text-slate-300 hover:bg-white/[.06] hover:text-white'}`
     return (
-      <nav aria-label="Main" className="flex h-full flex-col bg-[#0b1f3a] text-slate-200">
-        <div className={`flex h-16 shrink-0 items-center gap-2 border-b border-white/10 text-white ${wide ? 'px-5' : 'justify-center'}`}><Shield className="shrink-0 text-sky-400" size={26} />{wide && <div><p className="font-bold leading-tight">AthleteGuard</p><p className="text-[10px] text-slate-400">Injury Detection</p></div>}</div>
-        {wide && <p className="px-6 pb-2 pt-6 text-[11px] font-semibold uppercase tracking-wider text-slate-400">Menu</p>}
-        <ul className={`flex-1 space-y-2 overflow-y-auto px-3 ${wide ? 'pb-4' : 'py-6'}`}>
+      <nav aria-label="Main" className="flex h-full flex-col bg-gradient-to-b from-navy-900 to-navy-950 text-slate-200">
+        <div className={`flex h-[72px] shrink-0 items-center border-b border-white/[.07] ${wide ? 'px-5' : 'justify-center'}`}>{wide ? <Logo size={32} /> : <LogoMark size={32} />}</div>
+        {wide && <p className="px-6 pb-2 pt-6 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Menu</p>}
+        <ul className={`ag-scroll flex-1 space-y-1 overflow-y-auto px-3 ${wide ? 'pb-4' : 'py-6'}`}>
           {items.map((i) => (
             <li key={i.to}>
               <NavLink to={i.to} onClick={() => setDrawer(false)} title={i.label} className={({ isActive }) => link(isActive)}>
-                {({ isActive }) => <>
-                  {isActive && <span className="absolute inset-y-2 left-0 w-1 rounded-r bg-sky-400" />}
-                  <i.icon size={20} className="shrink-0" />{wide && i.label}
-                </>}
+                <i.icon size={19} className="shrink-0" />{wide && i.label}
               </NavLink>
             </li>
           ))}
         </ul>
-        <div className="shrink-0 space-y-2 border-t border-white/10 px-3 py-4">
+        <div className="shrink-0 space-y-1 border-t border-white/[.07] px-3 py-4">
           {wide && (
-            <div className="flex items-center gap-3 rounded-xl bg-white/5 px-3 py-3">
-              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-sky-500 text-sm font-bold text-white">{(user.name[0] || '?').toUpperCase()}</span>
+            <div className="mb-2 flex items-center gap-3 rounded-xl bg-white/[.05] px-3 py-3 ring-1 ring-white/[.06]">
+              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-gradient-to-br from-sky-400 to-brand-600 text-sm font-bold text-white">{(user.name[0] || '?').toUpperCase()}</span>
               <div className="min-w-0"><p className="truncate text-sm font-semibold text-white">{user.name}</p><p className="truncate text-xs text-slate-400">{ROLE_NAME[user.role]}</p></div>
             </div>
           )}
@@ -139,21 +140,21 @@ export default function Layout() {
   }
 
   return (
-    <div className="flex min-h-screen">
-      <aside className={`hidden shrink-0 bg-[#0b1f3a] lg:block ${collapsed ? 'w-16' : 'w-60'}`}><div className="sticky top-0 h-screen">{side(false)}</div></aside>
-      {drawer && <div className="fixed inset-0 z-40 lg:hidden"><div className="absolute inset-0 bg-slate-900/50" onClick={() => setDrawer(false)} /><div className="relative h-full w-64">{side(true)}</div></div>}
+    <div className="flex min-h-screen bg-[#f3f6fb]">
+      <aside className={`hidden shrink-0 bg-navy-950 lg:block ${collapsed ? 'w-[72px]' : 'w-64'}`}><div className="sticky top-0 h-screen">{side(false)}</div></aside>
+      {drawer && <div className="fixed inset-0 z-40 lg:hidden"><div className="absolute inset-0 bg-navy-950/60 backdrop-blur-sm" onClick={() => setDrawer(false)} /><div className="relative h-full w-64">{side(true)}</div></div>}
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-30 flex h-16 items-center gap-3 border-b border-slate-200 bg-white px-4">
-          <button aria-label="Open menu" className="lg:hidden" onClick={() => setDrawer(true)}><Menu /></button>
-          <button aria-label="Collapse sidebar" className="hidden lg:block" onClick={() => setCollapsed((c) => !c)}><PanelLeft /></button>
-          {player ? <div className="flex-1" /> : <form onSubmit={search} className="relative max-w-md flex-1" role="search"><Search size={16} className="absolute left-3 top-2.5 text-slate-400" /><input aria-label="Search events, players" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search players, events…" className="w-full rounded-lg border border-slate-300 py-2 pl-9 pr-3 text-sm" /></form>}
+        <header className="sticky top-0 z-30 flex h-[72px] items-center gap-3 border-b border-slate-200/80 bg-white/90 px-4 backdrop-blur md:px-6">
+          <button aria-label="Open menu" className="rounded-lg p-2 text-slate-600 hover:bg-slate-100 lg:hidden" onClick={() => setDrawer(true)}><Menu size={20} /></button>
+          <button aria-label="Collapse sidebar" className="hidden rounded-lg p-2 text-slate-600 hover:bg-slate-100 lg:block" onClick={() => setCollapsed((c) => !c)}><PanelLeft size={20} /></button>
+          {player ? <div className="flex-1" /> : <form onSubmit={search} className="relative max-w-md flex-1" role="search"><Search size={16} className="absolute left-3.5 top-3 text-slate-400" /><input aria-label="Search events, players" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search players, matches, events…" className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-10 pr-3 text-sm outline-none transition focus:border-brand-600 focus:bg-white focus:ring-2 focus:ring-brand-600/15" /></form>}
           <div className="relative ml-auto">
-            <button aria-label={`Notifications, ${high.length} ${staff ? 'unread' : 'high-risk'}`} onClick={() => { setBell((b) => !b); setMenu(false) }} className="relative rounded-lg p-2 hover:bg-slate-100">
-              <Bell size={20} />
+            <button aria-label={`Notifications, ${high.length} ${staff ? 'unread' : 'high-risk'}`} onClick={() => { setBell((b) => !b); setMenu(false) }} className="relative rounded-xl border border-slate-200 bg-white p-2.5 text-slate-600 hover:bg-slate-50">
+              <Bell size={18} />
               {high.length > 0 && <span className="absolute -right-0.5 -top-0.5 grid h-5 min-w-5 place-items-center rounded-full bg-red-600 px-1 text-[10px] font-bold text-white">{high.length > 99 ? '99+' : high.length}</span>}
             </button>
             {bell && (
-              <div className="absolute right-0 mt-2 w-80 rounded-xl border border-slate-200 bg-white p-4 text-sm shadow-lg">
+              <div className="absolute right-0 mt-2 w-80 rounded-2xl border border-slate-200 bg-white p-4 text-sm shadow-xl">
                 <p className="font-semibold">Notifications</p>
                 {high.length === 0 ? <p className="py-4 text-center text-slate-500">No unread alerts</p> : (
                   <ul className="mt-2 divide-y divide-slate-100">{high.slice(0, 5).map((e) => (
@@ -172,12 +173,12 @@ export default function Layout() {
             )}
           </div>
           <div className="relative">
-            <button onClick={() => { setMenu((m) => !m); setBell(false) }} className="flex items-center gap-2 rounded-lg p-1.5 hover:bg-slate-100" aria-haspopup="menu" aria-expanded={menu}><span className="grid h-8 w-8 place-items-center rounded-full bg-[#0b1f3a] text-xs font-bold text-white">{(user.name[0] || '?').toUpperCase()}</span><span className="hidden text-left text-xs sm:block"><b className="block">{user.name}</b>{user.role}</span><ChevronDown size={14} /></button>
-            {menu && <div role="menu" className="absolute right-0 mt-2 w-44 rounded-xl border border-slate-200 bg-white p-1 text-sm shadow-lg"><button role="menuitem" className="block w-full rounded px-3 py-2 text-left hover:bg-slate-100" onClick={() => { setMenu(false); nav(player ? '/player/profile' : '/settings') }}>{player ? 'My profile' : 'Profile & settings'}</button><button role="menuitem" className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-red-700 hover:bg-slate-100" onClick={() => { logout(); nav('/login', { replace: true }) }}><LogOut size={14} />Log out</button></div>}
+            <button onClick={() => { setMenu((m) => !m); setBell(false) }} className="flex items-center gap-2.5 rounded-xl py-1 pl-1 pr-2 hover:bg-slate-100" aria-haspopup="menu" aria-expanded={menu}><span className="grid h-9 w-9 place-items-center rounded-full bg-gradient-to-br from-sky-400 to-brand-600 text-sm font-bold text-white">{(user.name[0] || '?').toUpperCase()}</span><span className="hidden text-left text-xs leading-tight sm:block"><b className="block text-sm text-navy-900">{user.name}</b><span className="text-slate-500">{ROLE_NAME[user.role]}</span></span><ChevronDown size={14} className="text-slate-400" /></button>
+            {menu && <div role="menu" className="absolute right-0 mt-2 w-44 rounded-2xl border border-slate-200 bg-white p-1 text-sm shadow-lg"><button role="menuitem" className="block w-full rounded px-3 py-2 text-left hover:bg-slate-100" onClick={() => { setMenu(false); nav(player ? '/player/profile' : '/settings') }}>{player ? 'My profile' : 'Profile & settings'}</button><button role="menuitem" className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-red-700 hover:bg-slate-100" onClick={() => { logout(); nav('/login', { replace: true }) }}><LogOut size={14} />Log out</button></div>}
           </div>
         </header>
         {user.dev && <div className="bg-amber-100 px-4 py-1.5 text-center text-xs font-semibold text-amber-900">DEV PREVIEW: not authenticated, no backend data. <Badge tone="amber">DEV DATA</Badge></div>}
-        <main className="flex-1 p-4 md:p-6"><Outlet /></main>
+        <main className="flex-1 p-4 md:p-7"><Outlet /></main>
         {popups.length > 0 && (
           <div className="fixed bottom-4 right-4 z-50 w-80 space-y-2" aria-live="polite">
             {popups.map((e) => (

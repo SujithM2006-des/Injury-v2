@@ -43,18 +43,18 @@ export async function clearAllEvents(): Promise<number> {
   return (await api.delete<{ deleted_events: number }>(EP.clearEvents)).data.deleted_events
 }
 
-/** Admin only: every login account. */
+/** Admin: every login account. Team owner: own team's logins + medical staff. */
 export async function getUsers(): Promise<AppUser[]> {
   return (await api.get<UserDto[]>(EP.users)).data.map(toUser)
 }
 
-/** Admin only. Username is plain text (e.g. "coach3"); a coach needs a team, a player login needs its roster player. */
+/** Admin, or a team owner for their own team (coach / player only). A coach or owner needs a team, a player login needs its roster player. */
 export async function createUser(v: { username: string; password: string; role: Role; teamId: number | null; playerId?: number | null }): Promise<AppUser> {
-  const r = await api.post<{ user: UserDto }>(EP.users, { username: v.username, password: v.password, role: v.role.toLowerCase(), team_id: v.role === 'COACH' ? v.teamId : null, player_id: v.role === 'PLAYER' ? v.playerId ?? null : null })
+  const r = await api.post<{ user: UserDto }>(EP.users, { username: v.username, password: v.password, role: v.role.toLowerCase(), team_id: v.role === 'COACH' || v.role === 'OWNER' ? v.teamId : null, player_id: v.role === 'PLAYER' ? v.playerId ?? null : null })
   return toUser(r.data.user)
 }
 
-/** Admin only. You cannot delete yourself or the last admin. */
+/** Admin; a team owner only coach / player logins of their own team. You cannot delete yourself or the last admin. */
 export async function deleteUser(id: number): Promise<void> {
   await api.delete(EP.user(id))
 }

@@ -1083,7 +1083,7 @@ def assign_player(
 
     if not is_staff:
 
-        if current_user.role != "coach":
+        if current_user.role not in ("coach", "owner"):
             raise HTTPException(status_code=403, detail="Unknown role")
 
         if event.player_id is not None:
@@ -1170,7 +1170,8 @@ def get_events(
     if current_user.role in ("medical", "admin"):
         pass
 
-    elif current_user.role == "coach":
+    elif current_user.role in ("coach", "owner"):
+        # coach / team owner: own team's events + every Unidentified fall (to name the player)
         query = query.filter(
             or_(
                 Player.team_id == current_user.team_id,
@@ -1207,6 +1208,10 @@ def get_players(current_user: User = Depends(get_current_user), db: Session = De
     if current_user.role == "player":
         query = query.filter(Player.id == (_player_id_of(current_user) or -1))
 
+    # a team owner only gets their own team's players (no details of the other team)
+    elif current_user.role == "owner":
+        query = query.filter(Player.team_id == (current_user.team_id or -1))
+
     players = query.order_by(Player.team_id, Player.jersey_number).all()
 
     return [
@@ -1231,7 +1236,7 @@ def get_teams(current_user: User = Depends(get_current_user), db: Session = Depe
     if current_user.role in ("medical", "admin"):
         teams = db.query(Team).order_by(Team.id).all()
 
-    elif current_user.role in ("coach", "player"):
+    elif current_user.role in ("coach", "player", "owner"):
         teams = db.query(Team).filter(Team.id == current_user.team_id).all()
 
     else:
@@ -1360,7 +1365,12 @@ def clear_all_injury_events(current_user: User = Depends(get_current_user), db: 
 # Passwords are stored hashed, exactly the way /auth/login checks them.
 # ============================================
 
-USER_ROLES = ("admin", "medical", "coach", "player")
+USER_ROLES = ("admin", "medical", "coach", "player", "owner")
+
+# A team owner manages their own team's logins: creates and removes coach and player
+# accounts of that team. Medical, admin and owner accounts can only be removed by the admin.
+OWNER_CAN_CREATE = ("coach", "player")
+OWNER_CAN_REMOVE = ("coach", "player")
 
 # Player logins: which roster player each "player" account belongs to.
 # Kept in output/player_accounts.json ({"<user id>": <player id>}), so the database is not changed.
@@ -1388,8 +1398,8 @@ MAX_PASSWORD_LENGTH = 72      # bcrypt only uses the first 72 bytes
 class UserCreateRequest(BaseModel):
     username: str
     password: str
-    role: str                         # admin / medical / coach / player
-    team_id: Optional[int] = None     # required for coach, ignored otherwise
+    role: str                         # admin / medical / coach / player / owner
+    team_id: Optional[int] = None     # required for coach and owner, ignored otherwise
     player_id: Optional[int] = None   # required for player: the roster player this login belongs to
 
 
@@ -1427,12 +1437,24 @@ def _require_admin(current_user: User):
         raise HTTPException(status_code=403, detail="Only admin can manage user accounts")
 
 
+def _require_admin_or_owner(current_user: User):
+
+    if current_user.role not in ("admin", "owner"):
+        raise HTTPException(status_code=403, detail="Only admin or the team owner can manage user accounts")
+
+
 @app.get("/admin/users")
 def list_users(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
 
-    _require_admin(current_user)
+    _require_admin_or_owner(current_user)
 
-    users = db.query(User).order_by(User.role, User.username).all()
+    query = db.query(User)
+
+    # team owner: their own team's logins + medical staff (view only); never the other team
+    if current_user.role == "owner":
+        query = query.filter(or_(User.team_id == current_user.team_id, User.role == "medical"))
+
+    users = query.order_by(User.role, User.username).all()
 
     return [user_to_dict(u) for u in users]
 
@@ -1444,7 +1466,7 @@ def create_user(
     db: Session = Depends(get_db)
 ):
 
-    _require_admin(current_user)
+    _require_admin_or_owner(current_user)
 
     username = (request.username or "").strip()
     password = request.password or ""
@@ -1466,7 +1488,12 @@ def create_user(
         raise HTTPException(status_code=400, detail="Password must be " + str(MAX_PASSWORD_LENGTH) + " characters or fewer")
 
     if role not in USER_ROLES:
-        raise HTTPException(status_code=400, detail="Role must be admin, medical, coach or player")
+        raise HTTPException(status_code=400, detail="Role must be admin, medical, coach, player or owner")
+
+    is_owner = current_user.role == "owner"
+
+    if is_owner and role not in OWNER_CAN_CREATE:
+        raise HTTPException(status_code=403, detail="A team owner can only create coach and player logins")
 
     taken = db.query(User).filter(func.lower(User.username) == username.lower()).first()
 
@@ -1475,12 +1502,15 @@ def create_user(
 
     team_id = None
 
-    if role == "coach":
+    if role in ("coach", "owner"):
 
-        if request.team_id is None:
-            raise HTTPException(status_code=400, detail="Pick the team this coach manages")
+        # a team owner always creates logins for their own team
+        wanted_team = current_user.team_id if is_owner else request.team_id
 
-        team = db.query(Team).filter(Team.id == request.team_id).first()
+        if wanted_team is None:
+            raise HTTPException(status_code=400, detail="Pick the team this " + ("owner" if role == "owner" else "coach") + " belongs to")
+
+        team = db.query(Team).filter(Team.id == wanted_team).first()
 
         if team is None:
             raise HTTPException(status_code=404, detail="Team not found")
@@ -1498,6 +1528,9 @@ def create_user(
 
         if player is None:
             raise HTTPException(status_code=404, detail="Player not found")
+
+        if is_owner and player.team_id != current_user.team_id:
+            raise HTTPException(status_code=403, detail="A team owner can only create logins for their own team's players")
 
         accounts = _player_accounts()
         existing_ids = [int(k) for k, v in accounts.items() if str(k).isdigit() and v == player.id]
@@ -1530,7 +1563,7 @@ def create_user(
 @app.delete("/admin/users/{user_id}")
 def delete_user(user_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
 
-    _require_admin(current_user)
+    _require_admin_or_owner(current_user)
 
     user = db.query(User).filter(User.id == user_id).first()
 
@@ -1539,6 +1572,13 @@ def delete_user(user_id: int, current_user: User = Depends(get_current_user), db
 
     if user.id == current_user.id:
         raise HTTPException(status_code=400, detail="You cannot delete your own account")
+
+    # team owner: only coach and player logins of their own team (never medical, admin or owner)
+    if current_user.role == "owner":
+        if user.role not in OWNER_CAN_REMOVE:
+            raise HTTPException(status_code=403, detail="A team owner cannot remove " + user.role + " accounts")
+        if user.team_id != current_user.team_id:
+            raise HTTPException(status_code=403, detail="A team owner can only remove their own team's logins")
 
     if user.role == "admin" and db.query(User).filter(User.role == "admin").count() <= 1:
         raise HTTPException(status_code=400, detail="At least one admin account must remain")
@@ -1663,7 +1703,7 @@ def _medical_knowledge_base():
 @app.get("/admin/system")
 def system_status(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
 
-    _require_admin(current_user)
+    _require_admin_or_owner(current_user)    # owner: read-only view
 
     now = _now_utc()
 
@@ -1806,7 +1846,7 @@ def _can_see_event(user: User, event: InjuryEvent):
     """Medical/admin see every event. A coach sees their team's events and every Unidentified fall."""
     if user.role in ("medical", "admin"):
         return True
-    if user.role == "coach":
+    if user.role in ("coach", "owner"):
         return event.player is None or event.player.team_id == user.team_id
     if user.role == "player":
         pid = _player_id_of(user)
@@ -1879,7 +1919,7 @@ def _assessment_for(user: User, record):
     """Coaches only get the outcome, never the clinical notes."""
     if record is None:
         return None
-    if user.role in ("medical", "admin"):
+    if user.role in ("medical", "admin", "owner"):
         return record
     return {k: record.get(k) for k in ("event_id", "status", "saved_at", "saved_by")}
 
@@ -2111,9 +2151,9 @@ def _photo_player(player_id: int, user: User, db: Session):
     player = db.query(Player).filter(Player.id == player_id).first()
     if player is None:
         raise HTTPException(status_code=404, detail="Player not found")
-    if user.role == "coach" and player.team_id != user.team_id:
-        raise HTTPException(status_code=403, detail="Coaches can only manage photos of their own team's players")
-    if user.role not in ("medical", "admin", "coach"):
+    if user.role in ("coach", "owner") and player.team_id != user.team_id:
+        raise HTTPException(status_code=403, detail="You can only manage photos of your own team's players")
+    if user.role not in ("medical", "admin", "coach", "owner"):
         raise HTTPException(status_code=403, detail="Unknown role")
     return player
 
@@ -2249,13 +2289,13 @@ def _history_can_view(user: User, player: Player):
         return True
     if user.role == "player":
         return player.id == _player_id_of(user)
-    return user.role == "coach" and player.team_id == user.team_id
+    return user.role in ("coach", "owner") and player.team_id == user.team_id
 
 
 def _history_can_edit(user: User, player: Player):
     if user.role == "admin":
         return True
-    return user.role == "coach" and player.team_id == user.team_id
+    return user.role in ("coach", "owner") and player.team_id == user.team_id
 
 
 def _history_player(player_id: int, user: User, db: Session, edit=False):

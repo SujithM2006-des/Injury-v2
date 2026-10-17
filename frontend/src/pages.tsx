@@ -13,8 +13,10 @@ import type { AssessmentDto, DetectorInfoDto, DetectorProgressDto, InjuryHistory
 import { useAlertReads, useAssessments, useDetector, useEvents, useInjuryHistory, useMatches, usePlayers, useTeams } from './queries'
 import { dateOptions } from './prefs'
 import type { InjuryEvent, Player, RiskLevel, Role } from './types'
+import { BodyMap, FootballerBack, RoleArt, StadiumBackdrop } from './art'
 import { safetyMeasures, SAFETY_DISCLAIMER } from './safety'
-import { Badge, Card, Confirm, Disclaimer, EmptyState, ErrorState, Field, IdentityBadge, Modal, Na, PageHeader, RiskBadge, SafetyMeasures, Skeleton, btn, btnD, btnP, btnS, inp, inpAuto, useToast, type Tone } from './ui'
+import { Badge, BarList, Card, Confirm, Disclaimer, DISCLAIMER_2, Donut, EmptyState, ErrorState, Field, IdentityBadge, KpiCard, Logo, LogoMark, Modal, Na, PageHeader, RiskBadge, SafetyMeasures, SERIES, Skeleton, STATUS_COLOR, TrendLine, btn, btnD, btnP, btnS, inp, inpAuto, useToast, type TileTone, type Tone } from './ui'
+import { ArrowRight, BellRing, BrainCircuit, ClipboardCheck, Crown, Mail, ScanFace, ShieldAlert, ShieldCheck, Stethoscope, Target, UserCog, Video } from 'lucide-react'
 
 /** Small outlined button used instead of text links */
 export const btnSm = `${btnS} !gap-1.5 !px-2.5 !py-1 !text-xs`
@@ -297,7 +299,7 @@ const fmtDay = (iso: string) => { const d = new Date(iso + 'T00:00:00'); return 
 
 /** Admin edits every player; a coach edits their own team. */
 const canEditHistory = (u: { role: Role; teamId: number | null; dev?: boolean } | null, p?: { teamId: number }) =>
-  !!u && !u.dev && !!p && (u.role === 'ADMIN' || (u.role === 'COACH' && u.teamId === p.teamId))
+  !!u && !u.dev && !!p && (u.role === 'ADMIN' || ((u.role === 'COACH' || u.role === 'OWNER') && u.teamId === p.teamId))
 
 const hs = z.object({
   playerId: z.string().min(1, 'Player is required'),
@@ -398,7 +400,7 @@ export function PreviousInjuries({ playerId, name }: { playerId: number; name: s
   const { user } = useAuth()
   const players = usePlayers().data ?? []
   const player = players.find((p) => p.id === playerId)
-  const coachOther = user?.role === 'COACH' && !!player && player.teamId !== user.teamId
+  const coachOther = (user?.role === 'COACH' || user?.role === 'OWNER') && !!player && player.teamId !== user.teamId
   const h = useInjuryHistory(!coachOther)
   const [adding, setAdding] = useState(false)
   const records = (h.data ?? []).filter((r) => r.player_id === playerId)
@@ -557,8 +559,31 @@ function ManualEventModal({ open, onClose, defaultMatch = '' }: { open: boolean;
   )
 }
 
-/* ---------- AUTH ---------- */
+/* ---------- AUTH: landing page with the login card ---------- */
 const ls = z.object({ username: z.string().min(1, 'Username or email is required'), password: z.string().min(1, 'Password is required') })
+
+const LANDING_FEATURES: [LucideIcon, string, string][] = [
+  [Video, 'Fall & injury detection', 'YOLO11 pose tracking finds falls, collisions and abnormal movement in match video.'],
+  [ScanFace, 'Player identification', 'Jersey number, face match and AI checks put a name on every fall.'],
+  [BrainCircuit, 'AI injury analysis', 'Possible injuries for the body region, risk level and expected rest.'],
+  [Stethoscope, 'Medical recommendation', 'Suggested tests, treatment, specialist and return-to-play guidance.'],
+  [BellRing, 'Instant alerts', 'High-risk falls reach staff on WhatsApp and the web in seconds.'],
+  [FileText, 'Medical reports', 'Assessments and full injury reports, ready to download as PDF.'],
+]
+const LANDING_STEPS: [LucideIcon, string, string][] = [
+  [Upload, 'Analyse the match', 'Run the detector on a match video or a live feed.'],
+  [Activity, 'Detect the incident', 'Falls and collisions are caught with the body region and risk.'],
+  [ShieldCheck, 'AI double-check', 'Fake and duplicate falls are removed, the player is identified.'],
+  [ClipboardCheck, 'Medical review', 'Staff get the alert, assess the player and download the report.'],
+]
+const LANDING_ROLES: [LucideIcon, string, string][] = [
+  [UserCog, 'Admin', 'Manage teams, players, logins and system status with full control.'],
+  [Crown, 'Team owner', 'Everything for your own team: incidents, reports, logins and status.'],
+  [Users, 'Coach', 'Follow your team\'s incidents, identify players and keep injury history.'],
+  [Stethoscope, 'Medical staff', 'Review every incident, record assessments and log manual events.'],
+  [UserCheck, 'Player', 'See your own falls, expected rest, history and medical outcome.'],
+]
+
 export function Login() {
   const { login, devPreview, user } = useAuth()
   const nav = useNavigate()
@@ -577,28 +602,216 @@ export function Login() {
       setErr(normalizeApiError(e))
     }
   })
-  return (
-    <div className="grid min-h-screen place-items-center bg-[#0b1f3a] p-4"><div className="w-full max-w-md rounded-2xl bg-white p-8 shadow-xl">
-      <div className="mb-6 text-center"><Shield className="mx-auto text-sky-600" size={40} /><h1 className="mt-2 text-2xl font-bold">AthleteGuard</h1><p className="text-sm text-slate-500">AI-Powered Football Injury Detection &amp; Medical Decision Support</p></div>
+  const toLogin = () => {
+    document.getElementById('login')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    setTimeout(() => document.getElementById('login-user')?.focus(), 400)
+  }
+  const iconInp = inp + ' !pl-10'
+
+  const card = (
+    <div id="login" className="w-full max-w-[420px] scroll-mt-24 rounded-2xl bg-white p-7 shadow-2xl shadow-navy-950/40 ring-1 ring-white/10 sm:p-8">
+      <div className="mb-6 flex justify-center"><Logo dark={false} size={40} /></div>
       {forgot ? (
         <div className="space-y-3">
+          <h2 className="text-xl font-bold text-navy-900">Reset password</h2>
           <p className="text-sm text-slate-600">Enter your email and an administrator-approved reset link will be sent when password reset is enabled.</p>
           <input className={inp} type="email" placeholder="Email" aria-label="Email" />
           {sent && <p className="text-sm text-amber-700">Password reset is not available yet. Ask your administrator to reset your password.</p>}
-          <button className={btnP + ' w-full justify-center'} onClick={() => setSent(true)}>Send reset link</button>
+          <button className={btnP + ' w-full justify-center !py-3'} onClick={() => setSent(true)}>Send reset link</button>
           <button className={btnS + ' w-full justify-center'} onClick={() => { setForgot(false); setSent(false) }}>Back to login</button>
         </div>
       ) : (
         <form onSubmit={go} className="space-y-4" noValidate>
-          {err && <div role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-800">{err}</div>}
-          <Field label="Username or email" err={f.formState.errors.username?.message}><input className={inp} autoComplete="username" {...f.register('username')} /></Field>
-          <Field label="Password" err={f.formState.errors.password?.message}><div className="relative"><input className={inp} type={show ? 'text' : 'password'} autoComplete="current-password" {...f.register('password')} /><button type="button" aria-label={show ? 'Hide password' : 'Show password'} className="absolute right-3 top-2.5 text-slate-500" onClick={() => setShow((s) => !s)}>{show ? <EyeOff size={16} /> : <Eye size={16} />}</button></div></Field>
-          <button className={btnP + ' w-full justify-center'} disabled={f.formState.isSubmitting}>{f.formState.isSubmitting ? 'Signing in…' : 'Sign in'}</button>
-          <button type="button" className={btnS + ' w-full justify-center'} onClick={() => setForgot(true)}>Forgot password?</button>
+          <div><h2 className="text-2xl font-bold text-navy-900">Welcome back!</h2><p className="text-sm text-slate-500">Sign in to your account</p></div>
+          {err && <div role="alert" className="rounded-xl bg-red-50 p-3 text-sm text-red-800 ring-1 ring-inset ring-red-600/15">{err}</div>}
+          <Field label="Username or email" err={f.formState.errors.username?.message}>
+            <div className="relative"><Mail size={16} className="absolute left-3.5 top-3 text-slate-400" /><input id="login-user" className={iconInp} placeholder="Email or username" autoComplete="username" {...f.register('username')} /></div>
+          </Field>
+          <Field label="Password" err={f.formState.errors.password?.message}>
+            <div className="relative"><Lock size={16} className="absolute left-3.5 top-3 text-slate-400" /><input className={iconInp + ' !pr-10'} placeholder="Password" type={show ? 'text' : 'password'} autoComplete="current-password" {...f.register('password')} /><button type="button" aria-label={show ? 'Hide password' : 'Show password'} className="absolute right-3.5 top-3 text-slate-400 hover:text-slate-600" onClick={() => setShow((s) => !s)}>{show ? <EyeOff size={16} /> : <Eye size={16} />}</button></div>
+          </Field>
+          <div className="flex justify-end"><button type="button" className="text-sm font-medium text-brand-600 hover:underline" onClick={() => setForgot(true)}>Forgot password?</button></div>
+          <button className={btnP + ' w-full justify-center !py-3 text-[15px]'} disabled={f.formState.isSubmitting}>{f.formState.isSubmitting ? 'Signing in…' : 'Login'}</button>
         </form>
       )}
-      <div className="mt-6 border-t pt-4"><p className="mb-2 flex items-center gap-2 text-xs font-semibold text-amber-800"><Badge tone="amber">DEV</Badge>Developer preview (no backend, no data)</p><div className="grid grid-cols-3 gap-2">{(['ADMIN', 'MEDICAL', 'COACH'] as Role[]).map((r) => <button key={r} className={btnS + ' justify-center'} onClick={() => { devPreview(r); nav(home[r]) }}>{r.charAt(0) + r.slice(1).toLowerCase()}</button>)}</div></div>
-    </div></div>
+      <div className="my-5 flex items-center gap-3 text-xs font-medium text-slate-400"><span className="h-px flex-1 bg-slate-200" />OR PREVIEW WITHOUT LOGIN<span className="h-px flex-1 bg-slate-200" /></div>
+      <div className="grid grid-cols-3 gap-2">
+        {([['ADMIN', ShieldCheck], ['MEDICAL', Stethoscope], ['COACH', Users]] as [Role, LucideIcon][]).map(([r, I]) => (
+          <button key={r} className={btnS + ' justify-center !px-2 !text-xs'} onClick={() => { devPreview(r); nav(home[r]) }}><I size={14} className="text-brand-600" />{r.charAt(0) + r.slice(1).toLowerCase()}</button>
+        ))}
+      </div>
+      <p className="mt-2 text-center text-[11px] text-slate-400">Preview shows the screens only, no backend data.</p>
+      <p className="mt-4 text-center text-xs text-slate-500">Don't have an account? Ask your organization's administrator.</p>
+    </div>
+  )
+
+  return (
+    <div className="min-h-screen bg-white text-navy-900">
+      {/* top navigation */}
+      <header className="sticky top-0 z-40 border-b border-white/[.07] bg-navy-950/90 backdrop-blur">
+        <div className="mx-auto flex h-[72px] max-w-7xl items-center gap-6 px-4 sm:px-6">
+          <a href="#top" aria-label="AthleteGuard home"><Logo size={38} /></a>
+          <nav className="ml-auto hidden items-center gap-9 text-sm font-medium text-slate-300 md:flex">
+            <a href="#top" className="border-b-2 border-brand-500 pb-1 text-white">Home</a>
+            <a href="#features" className="pb-1 hover:text-white">Features</a>
+            <a href="#about" className="pb-1 hover:text-white">About</a>
+            <a href="#contact" className="pb-1 hover:text-white">Contact</a>
+          </nav>
+          <button className="ml-auto inline-flex items-center gap-2 rounded-xl border border-brand-500/60 px-4 py-2 text-sm font-semibold text-sky-300 hover:bg-brand-500/10 md:ml-0" onClick={toLogin}><UserCheck size={16} />Login</button>
+        </div>
+      </header>
+
+      {/* hero: stadium, player #10, login card */}
+      <section id="top" className="relative overflow-hidden bg-navy-950">
+        <StadiumBackdrop className="absolute inset-0 h-full w-full" />
+        <div aria-hidden="true" className="absolute inset-0 bg-gradient-to-r from-navy-950/90 via-navy-950/30 to-navy-950/40" />
+        <FootballerBack className="pointer-events-none absolute bottom-0 left-[51%] hidden h-[84%] -translate-x-1/2 lg:block" />
+        <div className="relative mx-auto grid min-h-[600px] max-w-7xl items-center gap-10 px-4 py-14 sm:px-6 lg:grid-cols-[1fr_1fr] xl:grid-cols-[1.15fr_1fr]">
+          <div className="lg:pb-10">
+            <p className="font-display text-3xl font-bold tracking-wide text-sky-400">ATHLETE<span className="text-brand-500">GUARD</span></p>
+            <h1 className="mt-3 font-display text-5xl font-bold leading-[1.03] text-white sm:text-6xl lg:text-[58px]">
+              Smarter Decisions.<br /><span className="text-brand-500">Safer Players.</span><br /><span className="text-brand-500">Stronger Teams.</span>
+            </h1>
+            <p className="mt-6 max-w-md text-lg leading-relaxed text-slate-200">AI-powered injury detection and medical decision support for a healthier, stronger team.</p>
+            <div className="mt-8 flex flex-wrap gap-3">
+              <button className={btnP + ' !px-6 !py-3 text-[15px]'} onClick={toLogin}>Get Started <ArrowRight size={18} /></button>
+              <a href="#features" className="inline-flex items-center gap-2 rounded-xl border border-brand-500/70 px-6 py-3 text-[15px] font-semibold text-sky-300 hover:bg-brand-500/10">Learn More</a>
+            </div>
+          </div>
+          <div className="flex justify-center lg:justify-end">{card}</div>
+        </div>
+      </section>
+
+      {/* features: list on the left, product preview on the right */}
+      <section id="features" className="scroll-mt-20 bg-gradient-to-b from-white to-[#f3f6fb]">
+        <div className="mx-auto grid max-w-7xl items-center gap-12 px-4 py-20 sm:px-6 lg:grid-cols-[0.9fr_1.1fr]">
+          <div>
+            <p className="text-sm font-bold uppercase tracking-wider text-brand-600">Our features</p>
+            <h2 className="mt-2 text-4xl font-bold leading-tight tracking-tight">Everything you need<br />in one platform</h2>
+            <p className="mt-4 max-w-md text-slate-600">From the first fall in the match video to the medical report, AthleteGuard gives coaches, medical staff and players what they need to act quickly and safely.</p>
+            <ul className="mt-8 grid gap-x-6 gap-y-5 sm:grid-cols-2">
+              {LANDING_FEATURES.map(([I, t, d]) => (
+                <li key={t} className="flex items-start gap-3" title={d}>
+                  <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-brand-600 text-white shadow-md shadow-brand-600/30"><I size={19} /></span>
+                  <span><span className="block text-sm font-semibold">{t}</span><span className="block text-xs leading-snug text-slate-500">{d}</span></span>
+                </li>
+              ))}
+            </ul>
+            <a href="#about" className="mt-8 inline-flex items-center gap-2 rounded-xl border border-brand-600 px-5 py-2.5 text-sm font-semibold text-brand-600 hover:bg-brand-50">Explore how it works <ArrowRight size={16} /></a>
+          </div>
+          <ProductPreview />
+        </div>
+      </section>
+
+      {/* roles */}
+      <section id="roles" className="relative scroll-mt-20 overflow-hidden bg-navy-900">
+        <div aria-hidden="true" className="absolute -right-40 top-0 h-[400px] w-[400px] rounded-full bg-brand-600/20 blur-[120px]" />
+        <div className="relative mx-auto grid max-w-7xl gap-10 px-4 py-20 sm:px-6 lg:grid-cols-[300px_1fr]">
+          <div className="self-center">
+            <p className="text-sm font-bold uppercase tracking-wider text-sky-400">Who is it for?</p>
+            <h2 className="mt-2 text-4xl font-bold leading-tight tracking-tight text-white">Built for every role in the team</h2>
+            <p className="mt-4 text-slate-300">Each login sees exactly what it needs. A team owner or coach only ever sees their own team.</p>
+            <a href="#about" className="mt-6 inline-flex items-center gap-2 rounded-xl border border-sky-400/50 px-5 py-2.5 text-sm font-semibold text-sky-300 hover:bg-sky-400/10">See how it works <ArrowRight size={16} /></a>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            {LANDING_ROLES.map(([I, t, d], i) => (
+              <div key={t} className="overflow-hidden rounded-2xl border border-white/10 bg-navy-800/60 transition hover:border-sky-400/40">
+                <RoleArt kind={(['admin', 'owner', 'coach', 'medical', 'player'] as const)[i]} className="block h-28 w-full" />
+                <div className="p-5">
+                  <h3 className="flex items-center gap-3 text-lg font-semibold text-white"><span className="grid h-10 w-10 place-items-center rounded-xl bg-brand-600 text-white"><I size={19} /></span>{t}</h3>
+                  <p className="mt-3 text-sm text-slate-300">{d}</p>
+                  <button onClick={toLogin} className="mt-3 inline-flex items-center gap-1.5 text-sm font-semibold text-sky-400 hover:text-sky-300">Sign in as {t.toLowerCase()} <ArrowRight size={14} /></button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* about: how it works + team art */}
+      <section id="about" className="scroll-mt-20 bg-[#f3f6fb]">
+        <div className="mx-auto grid max-w-7xl items-center gap-12 px-4 py-20 sm:px-6 lg:grid-cols-2">
+          <div>
+            <p className="text-sm font-bold uppercase tracking-wider text-brand-600">How it works</p>
+            <h2 className="mt-2 text-4xl font-bold leading-tight tracking-tight">From match video<br />to medical decision</h2>
+            <ol className="mt-8 space-y-4">
+              {LANDING_STEPS.map(([I, t, d], i) => (
+                <li key={t} className="flex items-start gap-4 rounded-2xl bg-white p-4 ring-1 ring-slate-200/80">
+                  <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-brand-50 text-brand-600"><I size={20} /></span>
+                  <span><span className="block font-semibold"><span className="mr-2 font-display text-lg text-brand-600">0{i + 1}</span>{t}</span><span className="block text-sm text-slate-600">{d}</span></span>
+                </li>
+              ))}
+            </ol>
+          </div>
+          <div className="relative h-[420px] overflow-hidden rounded-3xl shadow-2xl shadow-navy-900/30">
+            <StadiumBackdrop className="absolute inset-0 h-full w-full" />
+            <FootballerBack number={7} className="absolute bottom-0 left-[6%] h-[78%] opacity-90" />
+            <FootballerBack number={9} className="absolute bottom-0 right-[4%] h-[80%] opacity-90" />
+            <FootballerBack number={10} className="absolute bottom-0 left-1/2 h-[92%] -translate-x-1/2" />
+            <p className="absolute right-6 top-6 rotate-[-8deg] font-display text-3xl font-semibold italic leading-tight text-white/90">Safer.<br />Stronger.<br />Together.</p>
+          </div>
+        </div>
+      </section>
+
+      {/* call to action + footer */}
+      <section id="contact" className="relative overflow-hidden bg-navy-950">
+        <StadiumBackdrop className="absolute inset-0 h-full w-full opacity-50" />
+        <div className="relative mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-8 px-4 py-14 sm:px-6">
+          <Logo size={52} />
+          <div className="text-center">
+            <h2 className="text-2xl font-bold text-white">Ready to build a safer, stronger team?</h2>
+            <p className="mt-1 text-sm text-slate-300">Sign in with the login your administrator created for you.</p>
+            <div className="mt-5 flex justify-center gap-3">
+              <button className={btnP + ' !px-6'} onClick={toLogin}>Get Started <ArrowRight size={16} /></button>
+              <a href="#about" className="inline-flex items-center rounded-xl border border-brand-500/70 px-6 py-2 text-sm font-semibold text-sky-300 hover:bg-brand-500/10">How it works</a>
+            </div>
+          </div>
+          <p className="font-display text-2xl font-semibold italic leading-tight text-white/85">Healthy athletes.<br />Better performance.</p>
+        </div>
+      </section>
+      <footer className="border-t border-white/[.07] bg-navy-950">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-4 py-6 text-xs text-slate-400 sm:px-6">
+          <p>© {new Date().getFullYear()} AthleteGuard. All rights reserved.</p>
+          <p className="max-w-xl">{DISCLAIMER_2}</p>
+        </div>
+      </footer>
+    </div>
+  )
+}
+
+/** Product preview on the landing page: a small picture of the dashboard (illustration, no data). */
+function ProductPreview() {
+  const menu = ['Dashboard', 'Match Analysis', 'Injury Events', 'Teams & Players', 'Alerts', 'Reports', 'Settings']
+  return (
+    <div aria-hidden="true" className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-navy-900/20">
+      <div className="flex">
+        <div className="hidden w-40 shrink-0 bg-navy-900 p-3 sm:block">
+          <span className="flex items-center gap-1.5"><LogoMark size={20} /><span className="font-display text-sm font-bold text-white">ATHLETE<span className="text-brand-500">GUARD</span></span></span>
+          <ul className="mt-4 space-y-1">{menu.map((m, i) => <li key={m} className={`rounded-md px-2 py-1.5 text-[10px] font-medium ${i === 0 ? 'bg-brand-600 text-white' : 'text-slate-400'}`}>{m}</li>)}</ul>
+        </div>
+        <div className="min-w-0 flex-1 bg-[#f3f6fb] p-3">
+          <div className="flex items-center justify-between rounded-lg bg-white px-3 py-2"><span className="text-xs font-semibold">Dashboard</span><span className="h-5 w-5 rounded-full bg-gradient-to-br from-sky-400 to-brand-600" /></div>
+          <div className="mt-2 grid grid-cols-4 gap-2">
+            {([[Video, 'bg-emerald-50 text-emerald-600'], [Activity, 'bg-red-50 text-red-600'], [Users, 'bg-brand-50 text-brand-600'], [ShieldAlert, 'bg-amber-50 text-amber-600']] as [LucideIcon, string][]).map(([I, c], i) => (
+              <div key={i} className="flex items-center gap-2 rounded-lg bg-white p-2"><span className={`grid h-6 w-6 place-items-center rounded-md ${c}`}><I size={12} /></span><span className="flex-1 space-y-1"><span className="block h-1.5 w-3/4 rounded bg-slate-200" /><span className="block h-2.5 w-1/2 rounded bg-slate-300" /></span></div>
+            ))}
+          </div>
+          <div className="mt-2 grid grid-cols-[1.5fr_1fr] gap-2">
+            <div className="relative overflow-hidden rounded-lg">
+              <StadiumBackdrop className="block aspect-video w-full" />
+              <span className="absolute left-[38%] top-[44%] rounded border-2 border-red-500 bg-red-500/20 px-1.5 py-0.5 text-[9px] font-bold text-white">Fall</span>
+              <span className="absolute left-[62%] top-[30%] rounded border-2 border-sky-400 bg-sky-400/20 px-1.5 py-0.5 text-[9px] font-bold text-white">Collision</span>
+              <span className="absolute inset-x-2 bottom-2 h-1 rounded-full bg-white/30"><span className="block h-1 w-2/5 rounded-full bg-brand-500" /></span>
+            </div>
+            <div className="space-y-2 rounded-lg bg-white p-2">
+              <svg viewBox="0 0 40 40" className="mx-auto h-16 w-16 -rotate-90"><circle cx="20" cy="20" r="15" fill="none" stroke="#eef2f7" strokeWidth="5" /><circle cx="20" cy="20" r="15" fill="none" stroke="#16a34a" strokeWidth="5" strokeDasharray="55 100" /><circle cx="20" cy="20" r="15" fill="none" stroke="#d97706" strokeWidth="5" strokeDasharray="20 100" strokeDashoffset="-56" /><circle cx="20" cy="20" r="15" fill="none" stroke="#dc2626" strokeWidth="5" strokeDasharray="18 100" strokeDashoffset="-77" /></svg>
+              {['#2a78d6', '#eb6834', '#1baf7a'].map((c) => <span key={c} className="flex items-center gap-1.5"><span className="h-1.5 w-1.5 rounded-full" style={{ background: c }} /><span className="h-1.5 flex-1 rounded bg-slate-200" /></span>)}
+            </div>
+          </div>
+          <div className="mt-2 rounded-lg bg-white p-2"><svg viewBox="0 0 200 40" className="h-12 w-full"><path d="M0 34 L25 28 L50 30 L75 20 L100 24 L125 14 L150 18 L175 8 L200 12" fill="none" stroke="#1463ff" strokeWidth="2" /></svg></div>
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -627,12 +840,183 @@ const QA: Record<Role, [string, string][]> = {
   COACH: [['My team', '/teams'], ['View matches', '/matches'], ['View alerts', '/alerts']],
   MEDICAL: [['Review queue', '/events'], ['Collisions', '/collisions'], ['Reports', '/reports']],
   PLAYER: [],
+  OWNER: [['My team', '/teams'], ['Team logins', '/admin/users'], ['Reports', '/reports'], ['System status', '/admin/system']],
 }
+/** Dashboard heading per role */
+const DASH_TITLE: Record<Role, string> = { ADMIN: 'Admin dashboard', COACH: 'Coach dashboard', MEDICAL: 'Medical dashboard', PLAYER: 'Player dashboard', OWNER: 'Team owner dashboard' }
 /** Label on top of each dashboard KPI card (same on every dashboard) */
 export const kpiLabel = 'text-sm font-semibold text-blue-700'
 /** KPI cards fill the full width whatever their count (Tailwind needs the full class names written out) */
 const KPI_COLS: Record<number, string> = { 4: 'lg:grid-cols-4', 5: 'lg:grid-cols-5', 6: 'lg:grid-cols-3 xl:grid-cols-6' }
 const byRisk = (a: InjuryEvent, b: InjuryEvent) => ['HIGH', 'MEDIUM', 'LOW'].indexOf(a.risk ?? 'LOW') - ['HIGH', 'MEDIUM', 'LOW'].indexOf(b.risk ?? 'LOW')
+
+/** Icon + tile colour for each dashboard KPI label */
+const KPI_ICON: Record<string, [LucideIcon, TileTone]> = {
+  'Total teams': [Shield, 'blue'], 'My team': [Shield, 'blue'], 'Total players': [Users, 'violet'], 'Players in my team': [Users, 'violet'],
+  'Total incidents': [Activity, 'sky'], 'Recent incidents': [Activity, 'sky'], 'High-risk incidents': [ShieldAlert, 'red'], 'High-risk alerts': [ShieldAlert, 'red'],
+  'Pending medical reviews': [ClipboardCheck, 'amber'], 'Players needing attention': [HeartPulse, 'amber'], 'Pending reviews': [ClipboardCheck, 'blue'],
+  'Matches analysed': [Video, 'green'], 'Injury events': [Activity, 'red'], 'Players monitored': [Users, 'blue'], 'High-risk cases': [ShieldAlert, 'red'], 'Avg AI confidence': [Target, 'sky'],
+  'High priority': [ShieldAlert, 'red'], 'Medium priority': [Bell, 'amber'], 'Low priority': [CheckCircle2, 'green'], 'Assessments saved': [Stethoscope, 'violet'],
+}
+
+const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
+
+/** Charts built from the real event list: match analysis (video + detected events), risk split, event types, trend, body regions. */
+const TYPE_COLOR = (types: string[]) => new Map(types.map((t, i) => [t, SERIES[Math.min(i, SERIES.length - 1)]]))
+
+/** Small first-frame preview of a clip (or a placeholder when there is no clip). */
+function ClipThumb({ e, className = '' }: { e: InjuryEvent; className?: string }) {
+  return e.clipUrl
+    ? <video src={`${e.clipUrl}#t=0.8`} preload="metadata" muted playsInline className={`aspect-video shrink-0 rounded-lg bg-navy-900 object-cover ${className}`} />
+    : <span className={`grid aspect-video shrink-0 place-items-center rounded-lg bg-slate-100 text-slate-400 ${className}`}><VideoOff size={14} /></span>
+}
+
+/** "Recent match analysis": the match video with the detected events on a timeline, like the reference dashboard. */
+function MatchAnalysisPanel({ list, typeColor }: { list: InjuryEvent[]; typeColor: Map<string, string> }) {
+  // matches that have events, newest first
+  const byMatch = new Map<number, InjuryEvent[]>()
+  list.forEach((e) => { if (e.matchId !== null) byMatch.set(e.matchId, [...(byMatch.get(e.matchId) ?? []), e]) })
+  const matchIds = [...byMatch.keys()].sort((a, b) => Math.max(...byMatch.get(b)!.map((e) => +new Date(e.timestamp))) - Math.max(...byMatch.get(a)!.map((e) => +new Date(e.timestamp))))
+  const [matchId, setMatchId] = useState<number | null>(null)
+  const mid = matchId !== null && byMatch.has(matchId) ? matchId : matchIds[0] ?? null
+  const evs = mid !== null ? [...byMatch.get(mid)!].sort((a, b) => (a.videoTimeSec ?? 0) - (b.videoTimeSec ?? 0)) : []
+  const [selId, setSelId] = useState<number | null>(null)
+  const sel = evs.find((e) => e.id === selId) ?? [...evs].sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp)).find((e) => e.clipUrl) ?? evs[0]
+  const ids = useIdentifying()
+
+  if (!evs.length) return (
+    <Card className="xl:col-span-8">
+      <h2 className="font-semibold">Recent match analysis</h2>
+      <EmptyState title="No match analysed yet" text="Run the detector on a match video. Its incidents, clips and timeline appear here." />
+    </Card>
+  )
+  const name = matchShort(sel.matchName) ?? 'Match'
+  const [home, away] = name.split(/\s+vs\.?\s+/i)
+  const maxT = Math.max(60, ...evs.map((e) => e.videoTimeSec ?? 0)) * 1.05
+  const conf = (e: InjuryEvent) => (e.gemini.confidence !== null ? Math.round(e.gemini.confidence * 100) : null)
+
+  return (
+    <Card className="xl:col-span-8 !p-0">
+      <div className="flex flex-wrap items-center gap-3 border-b border-slate-100 px-5 py-4">
+        <span className="grid h-10 w-10 place-items-center rounded-xl bg-navy-900 text-white"><Shield size={20} /></span>
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-semibold uppercase tracking-wide text-brand-600">Recent match analysis</p>
+          <p className="truncate font-semibold text-navy-900">{away ? <>{home} <span className="text-slate-400">vs</span> {away}</> : name}</p>
+        </div>
+        <span className="hidden text-xs text-slate-500 sm:block">{fmtWhen(evs[evs.length - 1].timestamp)} · {evs.length} incident{evs.length === 1 ? '' : 's'}</span>
+        {matchIds.length > 1 && (
+          <select aria-label="Match" className={inpAuto + ' !py-1.5 text-xs'} value={mid ?? ''} onChange={(x) => { setMatchId(Number(x.target.value)); setSelId(null) }}>
+            {matchIds.map((m) => <option key={m} value={m}>{matchShort(byMatch.get(m)![0].matchName) ?? `Match #${m}`}</option>)}
+          </select>
+        )}
+      </div>
+      <div className="grid gap-4 p-5 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
+        <div className="min-w-0">
+          <div className="relative overflow-hidden rounded-xl bg-navy-950">
+            {sel.clipUrl
+              ? <video key={sel.id} src={sel.clipUrl} controls muted playsInline preload="metadata" className="aspect-video w-full" />
+              : <div className="grid aspect-video place-items-center text-sm text-slate-400"><span className="flex items-center gap-2"><VideoOff size={18} />No clip saved for this incident</span></div>}
+            <div className="pointer-events-none absolute left-3 top-3 rounded-lg border-2 px-2.5 py-1 text-xs font-bold text-white shadow" style={{ borderColor: STATUS_COLOR[sel.risk ?? 'LOW'], background: 'rgba(6,18,41,.72)' }}>
+              {sel.eventType}{sel.region ? ` · ${sel.region}` : ''}{conf(sel) !== null ? ` · ${conf(sel)}%` : ''}
+            </div>
+          </div>
+          {/* timeline of the match video */}
+          <div className="mt-4">
+            <div className="relative h-2 rounded-full bg-slate-100">
+              {evs.map((e) => e.videoTimeSec !== null && (
+                <button key={e.id} title={`${e.eventType} · ${fmtVideo(e.videoTimeSec)}`} aria-label={`${e.eventType} at ${fmtVideo(e.videoTimeSec)}`} onClick={() => setSelId(e.id)}
+                  className={`absolute top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow ${e.id === sel.id ? 'scale-125 ring-2 ring-navy-900/30' : ''}`}
+                  style={{ left: `${(e.videoTimeSec / maxT) * 100}%`, background: typeColor.get(e.eventType) }} />
+              ))}
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
+              {[...new Set(evs.map((e) => e.eventType))].map((t) => <span key={t} className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full" style={{ background: typeColor.get(t) }} />{t}</span>)}
+              <span className="ml-auto font-semibold text-navy-900">{fmtVideo(sel.videoTimeSec) ?? '—'}</span>
+            </div>
+          </div>
+        </div>
+        <div className="min-w-0">
+          <div className="mb-2 flex items-center justify-between"><p className="text-sm font-semibold">Detected events ({evs.length})</p><Link to="/events" className="text-xs font-semibold text-brand-600 hover:underline">All events</Link></div>
+          <ul className="max-h-[340px] space-y-2 overflow-y-auto pr-1">
+            {evs.map((e) => (
+              <li key={e.id}>
+                <button onClick={() => setSelId(e.id)} className={`flex w-full items-center gap-3 rounded-xl border p-2 text-left transition ${e.id === sel.id ? 'border-red-300 bg-red-50/60' : 'border-slate-200 hover:bg-slate-50'}`}>
+                  <ClipThumb e={e} className="w-20" />
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-center gap-1.5 text-sm font-semibold"><span className="h-2 w-2 rounded-full" style={{ background: typeColor.get(e.eventType) }} />{e.eventType}</span>
+                    <span className="block truncate text-xs text-slate-500">{e.region ?? 'Region not recorded'} · <PlayerName e={e} ids={ids} withJersey={false} /></span>
+                  </span>
+                  {conf(e) !== null ? <span className="rounded-lg bg-slate-100 px-2 py-1 text-xs font-bold text-navy-900">{conf(e)}%</span> : <RiskBadge level={e.risk} />}
+                </button>
+              </li>
+            ))}
+          </ul>
+          <Link to={`/events/${sel.id}`} className={btnP + ' mt-3 w-full justify-center'}>Open incident #{sel.id}<ChevronRight size={16} /></Link>
+        </div>
+      </div>
+    </Card>
+  )
+}
+
+function DashCharts({ list, loading }: { list: InjuryEvent[]; loading: boolean }) {
+  if (loading) return <div className="mt-5 grid gap-4 xl:grid-cols-12"><Card className="xl:col-span-8"><Skeleton className="aspect-video h-auto w-full" /></Card><Card className="xl:col-span-4"><Skeleton className="h-40 w-full" /></Card></div>
+  const risk = [
+    { label: 'High', value: list.filter((e) => e.risk === 'HIGH').length, color: STATUS_COLOR.HIGH },
+    { label: 'Medium', value: list.filter((e) => e.risk === 'MEDIUM').length, color: STATUS_COLOR.MEDIUM },
+    { label: 'Low', value: list.filter((e) => e.risk === 'LOW').length, color: STATUS_COLOR.LOW },
+  ]
+  const unrated = list.filter((e) => !e.risk).length
+  if (unrated) risk.push({ label: 'Unrated', value: unrated, color: '#94a3b8' })
+
+  const typeCount = new Map<string, number>()
+  list.forEach((e) => typeCount.set(e.eventType || 'Other', (typeCount.get(e.eventType || 'Other') ?? 0) + 1))
+  const sortedTypes = [...typeCount.entries()].sort((a, b) => b[1] - a[1])
+  const typeColor = TYPE_COLOR(sortedTypes.map(([t]) => t))
+  const top = sortedTypes.slice(0, 4)
+  const rest = sortedTypes.slice(4).reduce((n, [, v]) => n + v, 0)
+  const types = [...top.map(([label, value], i) => ({ label, value, color: SERIES[i] })), ...(rest ? [{ label: 'Other', value: rest, color: SERIES[4] }] : [])]
+
+  const today = new Date(); today.setHours(0, 0, 0, 0)
+  const days = Array.from({ length: 14 }, (_, i) => new Date(today.getTime() - (13 - i) * 86400000))
+  const perDay = new Map<string, number>()
+  list.forEach((e) => { const d = new Date(e.timestamp); perDay.set(dayKey(d), (perDay.get(dayKey(d)) ?? 0) + 1) })
+  const trend = days.map((d) => ({ label: d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }), value: perDay.get(dayKey(d)) ?? 0 }))
+  const last7 = trend.slice(7).reduce((n, p) => n + p.value, 0), prev7 = trend.slice(0, 7).reduce((n, p) => n + p.value, 0)
+
+  const regionCount = new Map<string, number>()
+  list.forEach((e) => { if (e.region) regionCount.set(e.region, (regionCount.get(e.region) ?? 0) + 1) })
+  const regions = [...regionCount.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([label, value]) => ({ label, value }))
+
+  return (
+    <div className="mt-5 grid gap-4 xl:grid-cols-12 [&>*]:min-w-0">
+      <MatchAnalysisPanel list={list} typeColor={typeColor} />
+      <div className="grid gap-4 md:grid-cols-2 xl:col-span-4 xl:grid-cols-1">
+        <Card>
+          <h2 className="font-semibold">Risk overview</h2>
+          <p className="mb-4 text-xs text-slate-500">All incidents by risk level</p>
+          <Donut data={risk} centerLabel="incidents" />
+        </Card>
+        <Card>
+          <h2 className="font-semibold">Injury event types</h2>
+          <p className="mb-4 text-xs text-slate-500">What was detected</p>
+          {types.length ? <Donut data={types} centerLabel="total" /> : <EmptyState title="No events yet" />}
+        </Card>
+      </div>
+      <Card className="xl:col-span-8">
+        <div className="flex items-start justify-between gap-2">
+          <div><h2 className="font-semibold">Risk trend</h2><p className="text-xs text-slate-500">Incidents per day, last 14 days</p></div>
+          <span className={`whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-semibold ${last7 > prev7 ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>{last7} this week{prev7 || last7 ? ` · ${last7 >= prev7 ? '+' : ''}${last7 - prev7}` : ''}</span>
+        </div>
+        <div className="mt-3"><TrendLine points={trend} unit="incidents" /></div>
+      </Card>
+      <Card className="xl:col-span-4">
+        <h2 className="font-semibold">Injury distribution</h2>
+        <p className="mb-4 text-xs text-slate-500">Most affected body regions</p>
+        {regions.length ? <BarList data={regions} /> : <EmptyState title="No body regions recorded" />}
+      </Card>
+    </div>
+  )
+}
 
 export function Dashboard({ role }: { role: Role }) {
   const { user } = useAuth()
@@ -649,14 +1033,20 @@ export function Dashboard({ role }: { role: Role }) {
   const list = ev.data ?? []
   const open = list.filter((e) => !e.resolved)
   const unidentified = list.filter((e) => !e.identified)
-  const myTeam = role === 'COACH' ? (teams.data ?? [])[0] : undefined
+  const myTeam = role === 'COACH' || role === 'OWNER' ? (teams.data ?? [])[0] : undefined
+  const matchesAnalysed = new Set(list.map((e) => e.matchId).filter((m) => m !== null)).size
+  // average of the real AI (Gemini) confidence; "—" until at least one fall was checked
+  const confs = list.map((e) => e.gemini.confidence).filter((c): c is number => c !== null)
+  const avgConf = confs.length ? `${Math.round((confs.reduce((a, b) => a + b, 0) / confs.length) * 100)}%` : '—'
 
   // Same KPI cards as the design; "—" where the backend has no data for it.
   const KPI: Record<Role, [string, number | string | null, string?][]> = {
-    ADMIN: [['Total teams', teams.data?.length ?? null], ['Total players', players.data?.length ?? null], ['Total incidents', ev.data ? list.length : null], ['High-risk incidents', ev.data ? list.filter((e) => e.risk === 'HIGH').length : null, 'text-red-700'], ['Pending medical reviews', ev.data ? open.length : null, 'text-amber-600']],
+    ADMIN: [['Matches analysed', ev.data ? matchesAnalysed : null], ['Injury events', ev.data ? list.length : null], ['Players monitored', players.data?.length ?? null], ['High-risk cases', ev.data ? list.filter((e) => e.risk === 'HIGH').length : null, 'text-red-700'], ['Pending reviews', ev.data ? open.length : null, 'text-amber-600'], ['Avg AI confidence', ev.data ? avgConf : null]],
     COACH: [['Players in my team', myTeam?.playerCount ?? null], ['Recent incidents', myTeam?.injuryEvents ?? null], ['High-risk alerts', myTeam?.highRiskEvents ?? null, 'text-red-700'], ['Players needing attention', myTeam ? myTeam.players.filter((p) => p.highRiskEvents > 0).length : null, 'text-amber-600']],
     MEDICAL: [['Pending reviews', ev.data ? open.length : null], ['High priority', ev.data ? open.filter((e) => e.risk === 'HIGH').length : null, 'text-red-700'], ['Medium priority', ev.data ? open.filter((e) => e.risk === 'MEDIUM').length : null, 'text-amber-600'], ['Low priority', ev.data ? open.filter((e) => e.risk === 'LOW').length : null, 'text-green-700'], ['Assessments saved', assessments.data ? assessments.data.length : null]],
     PLAYER: [],
+    // team owner: the admin's cards, for their own team only
+    OWNER: [['My team', myTeam ? myTeam.name : null], ['Matches analysed', ev.data ? matchesAnalysed : null], ['Injury events', ev.data ? list.length : null], ['Players monitored', players.data?.length ?? null], ['High-risk cases', ev.data ? list.filter((e) => e.risk === 'HIGH').length : null, 'text-red-700'], ['Pending reviews', ev.data ? open.length : null, 'text-amber-600']],
   }
 
   const clearAll = async () => {
@@ -675,18 +1065,19 @@ export function Dashboard({ role }: { role: Role }) {
   )
       return (
     <>
-      <PageHeader back={false} title={`${role.charAt(0) + role.slice(1).toLowerCase()} dashboard`} crumbs={[{ label: 'Dashboard' }]}
+      <PageHeader back={false} title={DASH_TITLE[role]} crumbs={[{ label: 'Dashboard' }]}
         actions={role !== 'ADMIN' && <>
           <Link to="/reports" className={btnS}><FileText size={16} />Reports</Link>
           {role === 'MEDICAL' && <button className={btnP} disabled={dev} onClick={() => setLogOpen(true)}><ClipboardPlus size={16} />Log manual event</button>}
         </>} />
       <div className={`grid grid-cols-2 gap-3 ${KPI_COLS[KPI[role].length] ?? 'lg:grid-cols-3 xl:grid-cols-6'}`}>
-        {KPI[role].map(([k, v, t]) => <Card key={k}><p className={kpiLabel}>{k}</p>{ev.isLoading ? <Skeleton className="mt-2 h-8 w-12" /> : <p className={`mt-1 truncate font-bold ${typeof v === 'string' ? 'text-lg' : 'text-3xl'} ${t ?? ''}`} title={typeof v === 'string' ? v : undefined}><Na v={v} /></p>}</Card>)}
+        {KPI[role].map(([k, v, t]) => { const [I, tone] = KPI_ICON[k] ?? [Activity, 'blue' as TileTone]; return <KpiCard key={k} label={k} icon={I} tone={tone} valueClass={t ?? ''} loading={ev.isLoading} value={typeof v === 'string' ? v : <Na v={v} />} /> })}
       </div>
       {dev && <p className="mt-2 text-xs text-slate-500">Metrics are shown only when real backend data is available.</p>}
-      {role === 'COACH' && !dev && <p className="mt-2 text-xs text-slate-500">You see your team's events and every unidentified fall.</p>}
+      {(role === 'COACH' || role === 'OWNER') && !dev && <p className="mt-2 text-xs text-slate-500">You see your team's events and every unidentified fall.</p>}
+      {!ev.isError && <DashCharts list={list} loading={ev.isLoading} />}
 
-      {role === 'ADMIN' ? (
+      {role === 'ADMIN' || role === 'OWNER' ? (
         <>
           {/* Admin: Recent incidents across the full width */}
           <div className="mt-5">
@@ -699,14 +1090,15 @@ export function Dashboard({ role }: { role: Role }) {
             </Card>
           </div>
           {/* Below: Recent alerts (left) | Admin controls over Quick actions (right) */}
-          <div className="mt-4 grid gap-4 lg:grid-cols-2">
+          <div className="mt-4 grid gap-4 lg:grid-cols-2 [&>*]:min-w-0">
             {recentAlerts}
             <div className="flex flex-col gap-4">
-              <Card>
+              {/* deleting injury data is admin only - never shown to a team owner */}
+              {role === 'ADMIN' && <Card>
                 <h2 className="font-semibold">Admin controls</h2>
                 <p className="mt-2 text-sm text-slate-500">Permanently delete every injury event. Players and teams are kept.</p>
                 <button className={btnD + ' mt-3 w-full justify-center'} disabled={dev} onClick={() => setConfirmClear(true)}><Trash2 size={16} />Delete all injury events</button>
-              </Card>
+              </Card>}
               <Card className="flex-1">
                 <h2 className="font-semibold">Quick actions</h2>
                 <div className="mt-3 flex flex-wrap gap-2">
@@ -716,6 +1108,8 @@ export function Dashboard({ role }: { role: Role }) {
               </Card>
             </div>
           </div>
+          {/* Team owner: previous injury history of their own team */}
+          {role === 'OWNER' && <div className="mt-4"><TeamInjuryHistory teamId={user?.teamId ?? myTeam?.id ?? null} /></div>}
         </>
       ) : (
         <>
@@ -739,7 +1133,7 @@ export function Dashboard({ role }: { role: Role }) {
           )}
         </>
       )}
-      <Confirm open={confirmClear} title="Delete all injury events?" text="Players and teams are kept. This cannot be undone." confirmLabel="Delete all" onConfirm={clearAll} onClose={() => setConfirmClear(false)} />
+      {role === 'ADMIN' && <Confirm open={confirmClear} title="Delete all injury events?" text="Players and teams are kept. This cannot be undone." confirmLabel="Delete all" onConfirm={clearAll} onClose={() => setConfirmClear(false)} />}
       {role === 'MEDICAL' && logOpen && <ManualEventModal open onClose={() => setLogOpen(false)} />}
     </>
   )
@@ -1027,9 +1421,14 @@ export function ReportsPage() {
 }
 
 /* ---------- USERS (admin): logins with a username, a starting password and a role ---------- */
-export const ROLE_LABEL: Record<Role, string> = { ADMIN: 'Admin', MEDICAL: 'Medical staff', COACH: 'Coach', PLAYER: 'Player' }
-export const ROLE_TONE: Record<Role, Tone> = { ADMIN: 'blue', MEDICAL: 'green', COACH: 'amber', PLAYER: 'violet' }
-const ROLES: Role[] = ['ADMIN', 'MEDICAL', 'COACH', 'PLAYER']
+export const ROLE_LABEL: Record<Role, string> = { ADMIN: 'Admin', MEDICAL: 'Medical staff', COACH: 'Coach', PLAYER: 'Player', OWNER: 'Team owner' }
+export const ROLE_TONE: Record<Role, Tone> = { ADMIN: 'blue', MEDICAL: 'green', COACH: 'amber', PLAYER: 'violet', OWNER: 'orange' }
+const ROLES: Role[] = ['ADMIN', 'MEDICAL', 'OWNER', 'COACH', 'PLAYER']
+/** A team owner creates only coach and player logins for their own team */
+const OWNER_ROLES: Role[] = ['COACH', 'PLAYER']
+/** Admin removes any other login; a team owner only coach / player logins of their own team (never medical) */
+const canRemoveUser = (me: { role: Role; teamId: number | null; name: string } | null, u: AppUser) =>
+  !!me && u.username !== me.name && (me.role === 'ADMIN' || (me.role === 'OWNER' && OWNER_ROLES.includes(u.role) && u.teamId === me.teamId))
 
 const us = z.object({
   username: z.string().trim().min(1, 'Username is required').max(50, 'Username must be 50 characters or fewer').regex(/^\S+$/, 'Username cannot contain spaces'),
@@ -1037,10 +1436,13 @@ const us = z.object({
   role: z.string().min(1, 'Pick a role'),
   teamId: z.string(),
   playerId: z.string(),
-}).refine((v) => v.role !== 'COACH' || v.teamId !== '', { path: ['teamId'], message: 'Pick the team this coach manages' })
+}).refine((v) => (v.role !== 'COACH' && v.role !== 'OWNER') || v.teamId !== '', { path: ['teamId'], message: 'Pick the team' })
   .refine((v) => v.role !== 'PLAYER' || v.playerId !== '', { path: ['playerId'], message: 'Pick the player this login belongs to' })
 
 function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { user } = useAuth()
+  const owner = user?.role === 'OWNER'
+  const roleChoices = owner ? OWNER_ROLES : ROLES
   const toast = useToast()
   const qc = useQueryClient()
   const teams = useTeams().data ?? []
@@ -1050,7 +1452,7 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
   const freePlayers = allPlayers.filter((p) => !withLogin.has(p.id))
   const [show, setShow] = useState(false)
   const [err, setErr] = useState('')
-  const empty = { username: '', password: '', role: '', teamId: '', playerId: '' }
+  const empty = { username: '', password: '', role: '', teamId: owner && user?.teamId ? String(user.teamId) : '', playerId: '' }
   const f = useForm<z.infer<typeof us>>({ resolver: zodResolver(us), defaultValues: empty })
   const role = f.watch('role')
   const playerId = f.watch('playerId')
@@ -1058,7 +1460,7 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
   const submit = f.handleSubmit(async (v) => {
     setErr('')
     try {
-      const u = await createUser({ username: v.username.trim(), password: v.password, role: v.role as Role, teamId: v.teamId ? Number(v.teamId) : null, playerId: v.playerId ? Number(v.playerId) : null })
+      const u = await createUser({ username: v.username.trim(), password: v.password, role: v.role as Role, teamId: owner ? user?.teamId ?? null : v.teamId ? Number(v.teamId) : null, playerId: v.playerId ? Number(v.playerId) : null })
       toast(u.role === 'PLAYER' ? `Created ${u.username}: ${u.playerName ?? 'player'}'s dashboard login. They can log in now.` : `Created ${u.username} (${ROLE_LABEL[u.role]}). They can log in now.`)
       qc.invalidateQueries({ queryKey: ['users'] })
       qc.invalidateQueries({ queryKey: ['teams'] })
@@ -1075,9 +1477,10 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
           <div className="relative"><input className={inp} type={show ? 'text' : 'password'} autoComplete="new-password" placeholder="At least 6 characters" {...f.register('password')} /><button type="button" aria-label={show ? 'Hide password' : 'Show password'} className="absolute right-3 top-2.5 text-slate-500" onClick={() => setShow((s) => !s)}>{show ? <EyeOff size={16} /> : <Eye size={16} />}</button></div>
         </Field>
         <Field label="Role *" err={f.formState.errors.role?.message}>
-          <select className={inp} {...f.register('role')}><option value="">Select…</option>{ROLES.map((r) => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}</select>
+          <select className={inp} {...f.register('role')}><option value="">Select…</option>{roleChoices.map((r) => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}</select>
         </Field>
-        {role === 'COACH' && (
+        {owner && role === 'COACH' && <p className="text-xs text-slate-500">The coach is added to your team.</p>}
+        {!owner && (role === 'COACH' || role === 'OWNER') && (
           <Field label="Team *" err={f.formState.errors.teamId?.message}>
             <select className={inp} {...f.register('teamId')}><option value="">Select team…</option>{teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}</select>
           </Field>
@@ -1109,6 +1512,7 @@ function UsersPage() {
   const [roleF, setRoleF] = useState('')
   const [open, setOpen] = useState(false)
   const [del, setDel] = useState<AppUser | null>(null)
+  const owner = user?.role === 'OWNER'
 
   const needle = search.trim().toLowerCase()
   const rows = (q.data ?? [])
@@ -1129,11 +1533,12 @@ function UsersPage() {
 
   return (
     <>
-      <PageHeader title="User management" crumbs={[{ label: 'Users' }]} actions={<button className={btnP} disabled={dev} onClick={() => setOpen(true)}><Plus size={16} />Create user</button>} />
+      <PageHeader title={owner ? 'Team logins' : 'User management'} crumbs={[{ label: 'Users' }]} actions={<button className={btnP} disabled={dev} onClick={() => setOpen(true)}><Plus size={16} />{owner ? 'Create coach / player login' : 'Create user'}</button>} />
+      {owner && <p className="-mt-2 mb-3 text-sm text-slate-500">Your team's logins and the medical staff. You can add and remove coach and player logins of your team; medical staff accounts are managed by the admin.</p>}
       <Card className="!p-0">
         <div className="flex flex-wrap gap-2 border-b border-slate-200 p-3">
           <input aria-label="Search users" className={inp + ' max-w-xs'} placeholder="Search username or team…" value={search} onChange={(e) => setSearch(e.target.value)} />
-          <select aria-label="Role" className={inpAuto} value={roleF} onChange={(e) => setRoleF(e.target.value)}><option value="">Role: All</option>{ROLES.map((r) => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}</select>
+          <select aria-label="Role" className={inpAuto} value={roleF} onChange={(e) => setRoleF(e.target.value)}><option value="">Role: All</option>{(owner ? ['OWNER', 'COACH', 'PLAYER', 'MEDICAL'] as Role[] : ROLES).map((r) => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}</select>
           {(search || roleF) && <button className={btnS} onClick={() => { setSearch(''); setRoleF('') }}>Clear</button>}
         </div>
         <div className="overflow-x-auto"><table className="w-full text-left text-sm">
@@ -1144,8 +1549,8 @@ function UsersPage() {
               <tr key={u.id} className="border-t hover:bg-slate-50">
                 <td className="px-4 py-3"><span className="font-medium">{u.username}</span>{isMe(u) && <span className="ml-2"><Badge tone="gray">You</Badge></span>}</td>
                 <td className="px-4 py-3"><Badge tone={ROLE_TONE[u.role]}>{ROLE_LABEL[u.role]}</Badge></td>
-                <td className="px-4 py-3 text-slate-600">{u.role === 'PLAYER' ? <>{u.playerName ?? '—'}{u.jersey !== null && ` #${u.jersey}`}{u.teamName && <span className="text-slate-400"> · {u.teamName}</span>}</> : u.role === 'COACH' ? (u.teamName ?? '—') : <span className="text-slate-400">All teams</span>}</td>
-                <td className="px-4 py-3 text-right">{!isMe(u) && <button className={btnSm + ' !text-red-700'} onClick={() => setDel(u)}><Trash2 size={14} />Delete</button>}</td>
+                <td className="px-4 py-3 text-slate-600">{u.role === 'PLAYER' ? <>{u.playerName ?? '—'}{u.jersey !== null && ` #${u.jersey}`}{u.teamName && <span className="text-slate-400"> · {u.teamName}</span>}</> : u.role === 'COACH' || u.role === 'OWNER' ? (u.teamName ?? '—') : <span className="text-slate-400">All teams</span>}</td>
+                <td className="px-4 py-3 text-right">{canRemoveUser(user ?? null, u) ? <button className={btnSm + ' !text-red-700'} onClick={() => setDel(u)}><Trash2 size={14} />Delete</button> : !isMe(u) && owner && <span className="text-xs text-slate-400">Admin only</span>}</td>
               </tr>
             ))}
           </tbody>
@@ -1171,7 +1576,7 @@ function TeamsHub() {
   const [createTeam, setCreateTeam] = useState(false)
   const [registerPlayer, setRegisterPlayer] = useState(false)
   const admin = user?.role === 'ADMIN'
-  const title = user?.role === 'COACH' ? 'Team & Players' : 'Teams & Players'
+  const title = user?.role === 'COACH' || user?.role === 'OWNER' ? 'Team & Players' : 'Teams & Players'
 
   const teams = t.data ?? []
   const team = teams.find((x) => x.id === selected) ?? teams[0]
@@ -1450,7 +1855,8 @@ export function Detail({ k }: { k: 'teams' | 'players' | 'reports' }) {
   const players = usePlayers()
   const ev = useEvents()
   const tabs = k === 'players' ? ['Overview', 'Incidents', 'Reference photos'] : k === 'teams' ? ['Overview', 'Roster', 'Statistics'] : ['Preview']
-  const label = { teams: user?.role === 'COACH' ? 'Team & Players' : 'Teams & Players', players: user?.role === 'COACH' ? 'Team & Players' : 'Teams & Players', reports: 'Reports' }[k]
+  const own = user?.role === 'COACH' || user?.role === 'OWNER'
+  const label = { teams: own ? 'Team & Players' : 'Teams & Players', players: own ? 'Team & Players' : 'Teams & Players', reports: 'Reports' }[k]
   const listPath = k === 'players' ? '/teams' : '/' + k
   const team = k === 'teams' ? (teams.data ?? []).find((t) => String(t.id) === id) : undefined
   const player = k === 'players' ? (players.data ?? []).find((p) => String(p.id) === id) : undefined
@@ -1605,6 +2011,7 @@ export function EventDetail({ collision = false }: { collision?: boolean }) {
   const ev = useEvents()
   const ids = useIdentifying()
   const [saved, setSaved] = useState<InjuryEvent | null>(null)
+  const [tab, setTab] = useState('Event video')
   const fromList = (ev.data ?? []).find((e) => String(e.id) === id)
   // After a coach names a player from the other team, the event leaves their list: keep showing what was saved.
   const e = fromList ?? (saved && String(saved.id) === id ? saved : null)
@@ -1622,78 +2029,135 @@ export function EventDetail({ collision = false }: { collision?: boolean }) {
 
   const g = geminiBadge(e)
   const others = e.player.playerId !== null ? (ev.data ?? []).filter((x) => x.player.playerId === e.player.playerId && x.id !== e.id) : []
+  const conf = e.gemini.confidence !== null ? Math.round(e.gemini.confidence * 100) : null
+  const TABS = ['Event video', 'Analysis', 'Player info', ...(staff ? ['Medical notes'] : []), ...(e.aiTreatment ? ['AI report'] : [])]
+  const t = TABS.includes(tab) ? tab : TABS[0]
+  const riskColor = STATUS_COLOR[e.risk ?? 'LOW']
+  // what the AI saw, written from the stored fields only
+  const findings: string[] = [
+    e.source === 'manual' ? 'Logged by medical staff' : `${e.eventType} detected in the match video`,
+    ...(e.region ? [`${e.region} impact`] : []),
+    ...(e.movement !== null ? [`Movement score ${e.movement}`] : []),
+    ...(e.aiInjury?.description ? [e.aiInjury.description] : []),
+    ...(e.gemini.description ? [e.gemini.description] : []),
+    ...(e.identified ? [`Player identified${identText(e) ? `: ${identText(e)}` : ''}`] : ['Player not identified yet']),
+  ]
 
   return (
     <>
       <PageHeader title={title} crumbs={crumbs} actions={actions} />
       {!fromList && <div className="mb-4 rounded-xl border border-slate-200 bg-white p-3 text-sm text-slate-600">Saved. This fall now belongs to the other team, so it no longer appears in your events list.</div>}
-      <div className="mb-4"><Disclaimer /></div>
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        <Card>
-          <p className="text-xs font-semibold uppercase text-slate-500">{collision ? 'Player A' : 'Player'}</p>
-          <p className="mt-1 text-lg font-bold">{e.player.name ?? (ids.has(e.id) ? <IdentifyingBar pct={ids.get(e.id)!} /> : 'Unknown Player')}</p>
-          <div className="mt-1"><IdentityBadge s={e.player.identityStatus} label={identText(e)} /></div>
-          <dl className="mt-3 grid grid-cols-2 gap-2 text-sm">
-            <dt className="text-slate-500">Player ID</dt><dd><Na v={e.player.playerId} /></dd>
-            <dt className="text-slate-500">Jersey</dt><dd><Na v={e.player.jersey} /></dd>
-            <dt className="text-slate-500">Team</dt><dd><Na v={e.player.team} /></dd>
-            <dt className="text-slate-500">Track ID (temporary)</dt><dd><Na v={e.player.trackId} /></dd>
-            <dt className="text-slate-500">Identity confidence</dt><dd><Na v={e.player.identityConfidence !== null ? `${Math.round(e.player.identityConfidence * 100)}%` : null} /></dd>
-          </dl>
-          {e.idDetail && <p className="mt-2 rounded-lg bg-slate-50 p-2 text-xs text-slate-600">{e.idDetail}</p>}
-          {e.player.playerId !== null && !isPlayer && <Link to={`/players/${e.player.playerId}`} className={btnS + ' mt-3'}><History size={16} />Player history</Link>}
-        </Card>
-        {collision && <Card><p className="text-xs font-semibold uppercase text-slate-500">Player B</p><p className="mt-2 font-semibold">Second participant not reported</p></Card>}
-        <Card>
-          <h2 className="font-semibold">Risk &amp; confidence</h2>
-          <dl className="mt-2 space-y-2 text-sm">
-            <Row label="Risk level"><RiskBadge level={e.risk} /></Row>
-            <Row label="Model confidence"><ModelConfidence e={e} /></Row>
-            <Row label="Identity confidence"><Na v={e.player.identityConfidence !== null ? `${Math.round(e.player.identityConfidence * 100)}%` : null} /></Row>
-            <Row label="Evidence quality">{e.clipUrl ? 'Clip available' : <Na />}</Row>
-          </dl>
-        </Card>
-        <Card>
-          <h2 className="font-semibold">Incident</h2>
-          <dl className="mt-2 space-y-2 text-sm">
-            <Row label="Match timestamp"><Na v={fmtVideo(e.videoTimeSec)} /></Row>
-            <Row label="Body region / side"><Na v={e.region} /></Row>
-            <Row label="Field location">Not available</Row>
-            <Row label="Recorded">{fmtDate(e.timestamp)}</Row>
-            <Row label="Source">{e.source === 'manual' ? 'Logged by staff' : 'AI detection'}</Row>
-            <Row label="Status">{e.resolved ? 'Resolved' : 'Pending'}</Row>
-          </dl>
-        </Card>
-        <Card className="xl:col-span-2">
-          <h2 className="font-semibold">Video clip &amp; evidence frames</h2>
-          {e.clipUrl ? (
-            <><video key={e.id} src={e.clipUrl} controls autoPlay className="mt-3 w-full rounded-xl bg-black" /><a href={e.clipUrl} download className={btnSm + ' mt-2'}><Download size={14} />Download clip if it doesn't play</a></>
-          ) : <div className="mt-3 grid grid-cols-3 gap-2">{['Before', 'Contact', 'After'].map((f) => <div key={f} className="grid aspect-video place-items-center rounded-lg bg-slate-100 text-xs text-slate-500">{f}: not available</div>)}</div>}
-        </Card>
-        <Card>
-          <h2 className="font-semibold">Why flagged?</h2>
-          <p className="mt-2 text-sm text-slate-600">{e.source === 'manual' ? 'Logged by medical staff.' : `The detector saw a ${e.eventType.toLowerCase()}${e.region ? ` with the most movement in the ${e.region.toLowerCase()}` : ''}.`}</p>
-          {g && <div className="mt-3"><p className="flex items-center gap-1 text-sm font-semibold"><Sparkles size={14} className="text-emerald-600" />Gemini second opinion</p><div className="mt-1"><Badge tone={g.tone}>{g.text}</Badge></div>{e.gemini.jersey !== null && <p className="mt-1 text-xs text-slate-600">Jersey read #{e.gemini.jersey}{e.gemini.team && e.gemini.team !== 'unknown' ? ` (${e.gemini.team})` : ''}{e.gemini.jerseyConfidence ? ` · ${Math.round(e.gemini.jerseyConfidence * 100)}%` : ''}</p>}{geminiDisagrees(e) && <p className="mt-1 text-xs text-amber-700">Gemini's jersey read differs from the stored player.</p>}{e.gemini.description && <p className="mt-1 text-xs text-slate-700">{e.gemini.description}</p>}{e.gemini.reason && <p className="mt-1 text-xs text-slate-500">Why: {e.gemini.reason}</p>}</div>}
-          <h3 className="mt-4 text-sm font-semibold">Movement metrics</h3>
-          <p className="text-sm text-slate-500">{e.movement !== null ? `Movement score: ${e.movement}` : 'Speed and joint-angle metrics not available.'}</p>
-        </Card>
-        {staff && <div className="md:col-span-2 xl:col-span-3"><AssessmentCard e={e} a={assessment.data ?? null} loading={assessment.isLoading} /></div>}
-        {user && canAssign(user.role, e) && <div className="md:col-span-2 xl:col-span-3"><IdentifyPanel key={`${e.id}-${e.player.playerId}`} ev={e} onSaved={(u) => { if (u) setSaved(u) }} /></div>}
-        <Card className="md:col-span-2 xl:col-span-3">
-          <h2 className="font-semibold">AI-suggested screening categories</h2>
-          {e.aiInjury ? <div className="mt-2"><PossibleInjuries e={e} /></div>
-            : e.injuryNote || e.note ? <div className="mt-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"><b>Possible injury:</b> {e.injuryNote ?? e.note}</div>
-            : <div className="mt-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"><b>Insufficient visual evidence.</b> No specific category is shown. Review the clip and perform medical assessment if concerning.</div>}
-          <div className="mt-3"><SafetyMeasures eventType={e.eventType} region={e.region} risk={e.risk} /></div>
-          <p className="mt-2 text-sm font-semibold">AI-suggested screening categories, NOT a confirmed diagnosis.</p>
-        </Card>
-        <MedicalRecommendation e={e} />
-        <Card>
-          <h2 className="font-semibold">Related</h2>
-          {others.length === 0 ? <><p className="mt-2 text-sm text-slate-500">Related {collision ? 'injury event' : 'collision'}: none reported</p><p className="text-sm text-slate-500">Related alert: none reported</p></>
-            : <><p className="mt-2 text-sm text-slate-500">Other events for this player:</p><ul className="mt-1 divide-y divide-slate-100">{others.slice(0, 5).map((x) => <EventLine key={x.id} e={x} />)}</ul></>}
-        </Card>
-      </div>
+
+      {/* header: thumbnail, title, risk */}
+      <Card className="!p-4">
+        <div className="flex flex-wrap items-center gap-4">
+          <ClipThumb e={e} className="w-28" />
+          <div className="min-w-0 flex-1">
+            <h2 className="truncate text-xl font-bold text-navy-900">{e.eventType} event{e.region ? ` - ${e.region}` : ''}</h2>
+            <p className="mt-0.5 text-sm text-slate-500">{fmtDate(e.timestamp)}{fmtVideo(e.videoTimeSec) ? ` · ${fmtVideo(e.videoTimeSec)} in video` : ''} · {matchShort(e.matchName) ?? 'No match'}</p>
+            <p className="mt-1 flex flex-wrap items-center gap-2 text-sm font-semibold">{e.player.name ?? (ids.has(e.id) ? <IdentifyingBar pct={ids.get(e.id)!} /> : 'Unknown player')}{e.player.jersey !== null && <span className="text-slate-400">#{e.player.jersey}</span>}<IdentityBadge s={e.player.identityStatus} label={identText(e)} /></p>
+          </div>
+          <div className="text-right">
+            <RiskBadge level={e.risk} />
+            {conf !== null && <p className="mt-1.5 text-sm font-semibold" style={{ color: riskColor }}>AI confidence: {conf}%</p>}
+            <p className="mt-1 text-xs text-slate-500">{e.resolved ? 'Reviewed' : 'Waiting for review'}</p>
+          </div>
+        </div>
+        <div role="tablist" className="mt-4 flex gap-1 overflow-x-auto border-t border-slate-100 pt-3">
+          {TABS.map((x) => <button key={x} role="tab" aria-selected={t === x} onClick={() => setTab(x)} className={`whitespace-nowrap rounded-lg px-3.5 py-2 text-sm font-semibold transition ${t === x ? 'bg-brand-600 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-100 hover:text-navy-900'}`}>{x}</button>)}
+        </div>
+      </Card>
+
+      {t === 'Event video' && (
+        <div className="mt-4 grid gap-4 xl:grid-cols-12 [&>*]:min-w-0">
+          <Card className="xl:col-span-6">
+            {e.clipUrl ? (
+              <><video key={e.id} src={e.clipUrl} controls autoPlay muted playsInline className="w-full rounded-xl bg-black" /><div className="mt-3 flex flex-wrap gap-2"><a href={e.clipUrl} download className={btnS}><Download size={16} />Download clip</a>{user?.role === 'MEDICAL' && <Link className={btnP} to={`/events/${id}/assessment`}><ClipboardPlus size={16} />Add to medical review</Link>}{e.player.playerId !== null && !isPlayer && <Link to={`/players/${e.player.playerId}`} className={btnS}><History size={16} />Player history</Link>}</div></>
+            ) : <div className="grid grid-cols-3 gap-2">{['Before', 'Contact', 'After'].map((f) => <div key={f} className="grid aspect-video place-items-center rounded-lg bg-slate-100 text-xs text-slate-500">{f}: not available</div>)}</div>}
+          </Card>
+          <Card className="xl:col-span-3">
+            <h2 className="flex items-center gap-2 font-semibold"><Sparkles size={16} className="text-brand-600" />AI analysis</h2>
+            <ul className="mt-3 space-y-2.5 text-sm">
+              {findings.map((f) => <li key={f} className="flex items-start gap-2"><CheckCircle2 size={16} className="mt-0.5 shrink-0 text-emerald-600" /><span className="text-slate-700">{f}</span></li>)}
+            </ul>
+            {g && <div className="mt-3"><Badge tone={g.tone}>{g.text}</Badge></div>}
+          </Card>
+          <Card className="xl:col-span-3">
+            <h2 className="font-semibold">Body region map</h2>
+            <BodyMap region={e.region} color={riskColor} className="mx-auto mt-3 h-64" />
+            <p className="mt-2 text-center text-sm font-semibold" style={{ color: riskColor }}>{e.region ?? 'No region recorded'}</p>
+          </Card>
+          <Card className="xl:col-span-12">
+            <h2 className="font-semibold">AI-suggested screening categories</h2>
+            {e.aiInjury ? <div className="mt-2"><PossibleInjuries e={e} /></div>
+              : e.injuryNote || e.note ? <div className="mt-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"><b>Possible injury:</b> {e.injuryNote ?? e.note}</div>
+              : <div className="mt-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"><b>Insufficient visual evidence.</b> No specific category is shown. Review the clip and perform medical assessment if concerning.</div>}
+            <div className="mt-3"><SafetyMeasures eventType={e.eventType} region={e.region} risk={e.risk} /></div>
+            <div className="mt-3"><Disclaimer /></div>
+          </Card>
+        </div>
+      )}
+
+      {t === 'Analysis' && (
+        <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3 [&>*]:min-w-0">
+          <Card>
+            <h2 className="font-semibold">Risk &amp; confidence</h2>
+            <dl className="mt-2 space-y-2 text-sm">
+              <Row label="Risk level"><RiskBadge level={e.risk} /></Row>
+              <Row label="Model confidence"><ModelConfidence e={e} /></Row>
+              <Row label="Identity confidence"><Na v={e.player.identityConfidence !== null ? `${Math.round(e.player.identityConfidence * 100)}%` : null} /></Row>
+              <Row label="Evidence quality">{e.clipUrl ? 'Clip available' : <Na />}</Row>
+            </dl>
+          </Card>
+          <Card>
+            <h2 className="font-semibold">Incident</h2>
+            <dl className="mt-2 space-y-2 text-sm">
+              <Row label="Match timestamp"><Na v={fmtVideo(e.videoTimeSec)} /></Row>
+              <Row label="Body region / side"><Na v={e.region} /></Row>
+              <Row label="Recorded">{fmtDate(e.timestamp)}</Row>
+              <Row label="Source">{e.source === 'manual' ? 'Logged by staff' : 'AI detection'}</Row>
+              <Row label="Status">{e.resolved ? 'Resolved' : 'Pending'}</Row>
+            </dl>
+          </Card>
+          <Card>
+            <h2 className="font-semibold">Why flagged?</h2>
+            <p className="mt-2 text-sm text-slate-600">{e.source === 'manual' ? 'Logged by medical staff.' : `The detector saw a ${e.eventType.toLowerCase()}${e.region ? ` with the most movement in the ${e.region.toLowerCase()}` : ''}.`}</p>
+            {g && <div className="mt-3"><p className="flex items-center gap-1 text-sm font-semibold"><Sparkles size={14} className="text-emerald-600" />Gemini second opinion</p><div className="mt-1"><Badge tone={g.tone}>{g.text}</Badge></div>{e.gemini.jersey !== null && <p className="mt-1 text-xs text-slate-600">Jersey read #{e.gemini.jersey}{e.gemini.team && e.gemini.team !== 'unknown' ? ` (${e.gemini.team})` : ''}{e.gemini.jerseyConfidence ? ` · ${Math.round(e.gemini.jerseyConfidence * 100)}%` : ''}</p>}{geminiDisagrees(e) && <p className="mt-1 text-xs text-amber-700">Gemini's jersey read differs from the stored player.</p>}{e.gemini.description && <p className="mt-1 text-xs text-slate-700">{e.gemini.description}</p>}{e.gemini.reason && <p className="mt-1 text-xs text-slate-500">Why: {e.gemini.reason}</p>}</div>}
+            <h3 className="mt-4 text-sm font-semibold">Movement metrics</h3>
+            <p className="text-sm text-slate-500">{e.movement !== null ? `Movement score: ${e.movement}` : 'Speed and joint-angle metrics not available.'}</p>
+          </Card>
+          {collision && <Card><p className="text-xs font-semibold uppercase text-slate-500">Player B</p><p className="mt-2 font-semibold">Second participant not reported</p></Card>}
+        </div>
+      )}
+
+      {t === 'Player info' && (
+        <div className="mt-4 grid gap-4 md:grid-cols-2 [&>*]:min-w-0">
+          <Card>
+            <p className="text-xs font-semibold uppercase text-slate-500">{collision ? 'Player A' : 'Player'}</p>
+            <p className="mt-1 text-lg font-bold">{e.player.name ?? (ids.has(e.id) ? <IdentifyingBar pct={ids.get(e.id)!} /> : 'Unknown Player')}</p>
+            <div className="mt-1"><IdentityBadge s={e.player.identityStatus} label={identText(e)} /></div>
+            <dl className="mt-3 grid grid-cols-2 gap-2 text-sm">
+              <dt className="text-slate-500">Player ID</dt><dd><Na v={e.player.playerId} /></dd>
+              <dt className="text-slate-500">Jersey</dt><dd><Na v={e.player.jersey} /></dd>
+              <dt className="text-slate-500">Team</dt><dd><Na v={e.player.team} /></dd>
+              <dt className="text-slate-500">Track ID (temporary)</dt><dd><Na v={e.player.trackId} /></dd>
+              <dt className="text-slate-500">Identity confidence</dt><dd><Na v={e.player.identityConfidence !== null ? `${Math.round(e.player.identityConfidence * 100)}%` : null} /></dd>
+            </dl>
+            {e.idDetail && <p className="mt-2 rounded-lg bg-slate-50 p-2 text-xs text-slate-600">{e.idDetail}</p>}
+            {e.player.playerId !== null && !isPlayer && <Link to={`/players/${e.player.playerId}`} className={btnS + ' mt-3'}><History size={16} />Player history</Link>}
+          </Card>
+          <Card>
+            <h2 className="font-semibold">Related</h2>
+            {others.length === 0 ? <><p className="mt-2 text-sm text-slate-500">Related {collision ? 'injury event' : 'collision'}: none reported</p><p className="text-sm text-slate-500">Related alert: none reported</p></>
+              : <><p className="mt-2 text-sm text-slate-500">Other events for this player:</p><ul className="mt-1 divide-y divide-slate-100">{others.slice(0, 5).map((x) => <EventLine key={x.id} e={x} />)}</ul></>}
+          </Card>
+          {user && canAssign(user.role, e) && <div className="md:col-span-2"><IdentifyPanel key={`${e.id}-${e.player.playerId}`} ev={e} onSaved={(u) => { if (u) setSaved(u) }} /></div>}
+        </div>
+      )}
+
+      {t === 'Medical notes' && staff && <div className="mt-4"><AssessmentCard e={e} a={assessment.data ?? null} loading={assessment.isLoading} /></div>}
+
+      {t === 'AI report' && <div className="mt-4 grid"><MedicalRecommendation e={e} /></div>}
     </>
   )
 }
@@ -2172,6 +2636,14 @@ export const ROLE_ACCESS: Record<Role, string[]> = {
     'Correct the identified player of any fall',
     'Download the injury report as PDF',
   ],
+  OWNER: [
+    'See every incident, alert, report and medical recommendation of your own team',
+    'Create and remove coach and player logins for your team',
+    'Add and edit your players\' previous injury history and reference photos',
+    'Identify the player in an unidentified fall from its clip',
+    'See the system status (read only)',
+    'Injury data cannot be deleted, and other teams are never shown',
+  ],
   PLAYER: [
     'See your own falls with the clip, possible injuries and expected rest',
     'See your previous injury history',
@@ -2188,7 +2660,7 @@ function StaffSettings() {
   const assessments = useAssessments(user?.role === 'MEDICAL')
   if (!user) return null
 
-  const coach = user.role === 'COACH'
+  const coach = user.role === 'COACH' || user.role === 'OWNER'
   const name = me.data?.username ?? user.name
   const teamName = me.data?.teamName ?? null
   const myTeam = coach ? (teams.data ?? [])[0] : undefined
