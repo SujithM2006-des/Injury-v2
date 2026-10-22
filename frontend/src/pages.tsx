@@ -8,6 +8,7 @@ import { Shield, Eye, EyeOff, Plus, Play, Pause, Square, RotateCcw, Maximize, Up
 import { useAuth, home } from './auth'
 import { addInjuryHistory, assignPlayer, clearAllEvents, createUser, deleteInjuryHistory, deletePlayerPhoto, deleteUser, getAssessment, getMe, getPlayerPhotoBlob, getPlayerPhotos, getSystemStatus, getUsers, logManualEvent, markAlertsRead, reopenEvent, resolveEvent, saveAssessment, updateInjuryHistory, uploadPlayerPhoto, type AssessmentInput, type InjuryHistoryInput } from './api/services'
 import { normalizeApiError } from './api/client'
+import { AdminSettingsPage } from './adminSettings'
 import type { AppUser } from './api/mappers'
 import type { AssessmentDto, DetectorInfoDto, DetectorProgressDto, InjuryHistoryDto, SystemDto } from './api/dto'
 import { useAlertReads, useAssessments, useDetector, useEvents, useInjuryHistory, useMatches, usePlayers, useTeams } from './queries'
@@ -2463,22 +2464,7 @@ export function Settings() {
 }
 
 function AdminSettings() {
-  const { user } = useAuth()
-  const toast = useToast()
-  const [tab, setTab] = useState('Profile')
-  return (
-    <>
-      <PageHeader title="Settings" crumbs={[{ label: 'Settings' }]} />
-      <div role="tablist" className="mb-4 flex gap-1 border-b">{['Profile', 'Preferences', 'Notifications', 'Security'].map((t) => <button key={t} role="tab" aria-selected={tab === t} onClick={() => setTab(t)} className={`px-4 py-2 text-sm ${tab === t ? 'border-b-2 border-[#0b1f3a] font-semibold' : 'text-slate-500'}`}>{t}</button>)}</div>
-      <Card className="max-w-xl space-y-3">
-        {tab === 'Profile' && <><Field label="Name"><input className={inp} defaultValue={user?.name} /></Field><Field label="Role"><input className={inp} value={user?.role} readOnly /></Field></>}
-        {tab === 'Preferences' && <Field label="Time format"><select className={inp}><option>24-hour</option><option>12-hour</option></select></Field>}
-        {tab === 'Notifications' && ['High-risk alerts', 'Medium-risk alerts', 'Low-risk alerts'].map((n) => <label key={n} className="flex items-center gap-2 text-sm"><input type="checkbox" defaultChecked />{n}</label>)}
-        {tab === 'Security' && <><Field label="Current password"><input type="password" className={inp} /></Field><Field label="New password"><input type="password" className={inp} /></Field></>}
-        <button className={btnP} onClick={() => toast(NC, true)}>Save changes</button>
-      </Card>
-    </>
-  )
+  return <AdminSettingsPage />
 }
 
 export function Help() {

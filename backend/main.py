@@ -816,7 +816,7 @@ def gemini_result(
     jersey_min = max(GEMINI_JERSEY_MIN_CONFIDENCE, min_jersey_confidence or 0.0)
 
     # 1) confident false alarm -> delete (never in jersey-only mode: the injury check decides that)
-    if (not jersey_only and verdict == "false_alarm" and confidence >= GEMINI_DELETE_MIN_CONFIDENCE
+    if (not jersey_only and verdict == "false_alarm" and confidence >= _gemini_delete_min()
             and event.identified_by != "manual" and not keep_false_alarm):
 
         clip_path = event.clip_path
@@ -2480,7 +2480,7 @@ def _band_match(db):
                 video_now = None
             return info.get("match_id"), info.get("match_name"), "running", video_now
         ended = _band_time(status.get("finished_at")) or last_seen
-        if ended and now - ended > _band_td(minutes=BAND_HOLD_AFTER_MATCH_MIN):
+        if ended and now - ended > _band_td(minutes=_band_hold()):
             return info.get("match_id"), info.get("match_name"), "over", None
         return info.get("match_id"), info.get("match_name"), "finished", None
     # no detector status yet: use the newest match
@@ -2524,7 +2524,7 @@ _BAND_RANK = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "NONE": 0}
 
 
 def _band_summary(player_id, key, db):
-    if key != BAND_KEY:
+    if key != _band_key():
         raise HTTPException(status_code=403, detail="Wrong band key")
     match_id, match_name, state, video_now = _band_match(db)
     counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
@@ -2571,3 +2571,232 @@ def band_status(player_id: int, key: str = Query(""), db: Session = Depends(get_
 @app.get("/band/{player_id}/summary")
 def band_summary(player_id: int, key: str = Query(""), db: Session = Depends(get_db)):
     return _band_summary(player_id, key, db)
+
+
+# ============================================
+# ADMIN SETTINGS (Settings page for the admin)
+#   detection  -> output/detection_settings.json (read by src/multi_player_injury.py at start)
+#   wristband  -> output/app_settings.json (band key + how long the band keeps its colour)
+#   data       -> clip storage clean-up and a full JSON backup
+# Only the admin can read or change these.
+# ============================================
+from fastapi.responses import JSONResponse as _AdmJSON
+from datetime import datetime as _adm_dt, timezone as _adm_tz
+
+DETECTION_SETTINGS_FILE = os.path.join(PROJECT_ROOT, "output", "detection_settings.json")
+APP_SETTINGS_FILE = os.path.join(PROJECT_ROOT, "output", "app_settings.json")
+
+# name -> (default, min, max, kind)
+DETECTION_FIELDS = {
+    "fall_angle": (60, 30, 85, "int"),                  # falling movement: body tilt from vertical (deg)
+    "fall_downward_ratio": (0.18, 0.05, 0.6, "float"),  # body must drop this share of its height
+    "lying_angle": (55, 30, 85, "int"),                 # lying down: torso tilt from vertical (deg)
+    "lying_aspect_ratio": (1.2, 0.8, 3.0, "float"),     # lying down: box width / height
+    "keypoint_confidence": (0.35, 0.1, 0.9, "float"),   # body points below this are ignored
+    "person_confidence": (0.45, 0.1, 0.9, "float"),     # people below this are ignored
+    "risk_medium_from": (12, 1, 100, "float"),          # movement (% of height per frame) for MEDIUM
+    "risk_high_from": (22, 2, 150, "float"),            # ... and for HIGH
+    "fall_cooldown_seconds": (5, 1, 60, "int"),         # same player can fall again after this
+    "gemini_check": (True, None, None, "bool"),         # Gemini double-checks every fall
+    "gemini_delete_min_confidence": (0.75, 0.5, 1.0, "float"),  # Gemini this sure of a false alarm -> deleted
+}
+
+
+def _admin_only(user: User):
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only the admin can change settings")
+
+
+def _detection_settings():
+    saved = _load_json(DETECTION_SETTINGS_FILE, {})
+    saved = saved if isinstance(saved, dict) else {}
+    return {k: saved.get(k, d[0]) for k, d in DETECTION_FIELDS.items()}
+
+
+def _app_settings():
+    saved = _load_json(APP_SETTINGS_FILE, {})
+    return saved if isinstance(saved, dict) else {}
+
+
+def _gemini_delete_min():
+    try:
+        return float(_detection_settings()["gemini_delete_min_confidence"])
+    except (TypeError, ValueError):
+        return GEMINI_DELETE_MIN_CONFIDENCE
+
+
+def _band_key():
+    return (_app_settings().get("band") or {}).get("key") or BAND_KEY
+
+
+def _band_hold():
+    try:
+        return int((_app_settings().get("band") or {}).get("hold_minutes", BAND_HOLD_AFTER_MATCH_MIN))
+    except (TypeError, ValueError):
+        return BAND_HOLD_AFTER_MATCH_MIN
+
+
+def _env_has(name):
+    """True if the key is set (environment or the project's .env). Never returns the value."""
+    if os.environ.get(name):
+        return True
+    try:
+        with open(os.path.join(PROJECT_ROOT, ".env"), "r", encoding="utf-8") as f:
+            for line in f:
+                k, _, v = line.strip().partition("=")
+                if k.strip() == name and v.strip().strip('"').strip("'"):
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def _clips_info():
+    count, size, oldest = 0, 0, None
+    if os.path.isdir(CLIPS_DIR):
+        for name in os.listdir(CLIPS_DIR):
+            full = os.path.join(CLIPS_DIR, name)
+            if os.path.isfile(full):
+                count += 1
+                size += os.path.getsize(full)
+                m = os.path.getmtime(full)
+                oldest = m if oldest is None else min(oldest, m)
+    days = None if oldest is None else round((_adm_dt.now().timestamp() - oldest) / 86400, 1)
+    return {"count": count, "size_mb": round(size / 1048576, 1), "oldest_days": days}
+
+
+@app.get("/admin/settings")
+def admin_settings(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    _admin_only(current_user)
+    band = _app_settings().get("band") or {}
+    return {
+        "detection": _detection_settings(),
+        "detection_defaults": {k: d[0] for k, d in DETECTION_FIELDS.items()},
+        "detection_limits": {k: [d[1], d[2]] for k, d in DETECTION_FIELDS.items() if d[3] != "bool"},
+        "band": {"key": _band_key(), "hold_minutes": _band_hold(), "custom_key": bool(band.get("key"))},
+        "info": {
+            "gemini_key": _env_has("GEMINI_API_KEY"),
+            "gemini_injury_key": _env_has("GEMINI_INJURY_API_KEY"),
+            "clips": _clips_info(),
+            "events": db.query(InjuryEvent).count(),
+            "players": db.query(Player).count(),
+            "matches": db.query(MatchSession).count(),
+        },
+    }
+
+
+@app.put("/admin/settings/detection")
+def save_detection_settings(request: dict, current_user: User = Depends(get_current_user)):
+    _admin_only(current_user)
+    out = _detection_settings()
+    for name, (default, lo, hi, kind) in DETECTION_FIELDS.items():
+        if name not in (request or {}):
+            continue
+        value = request[name]
+        label = name.replace("_", " ")
+        if kind == "bool":
+            out[name] = bool(value)
+            continue
+        try:
+            value = int(value) if kind == "int" else round(float(value), 3)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="'" + label + "' must be a number")
+        if value < lo or value > hi:
+            raise HTTPException(status_code=400, detail="'" + label + "' must be between " + str(lo) + " and " + str(hi))
+        out[name] = value
+    if out["risk_high_from"] <= out["risk_medium_from"]:
+        raise HTTPException(status_code=400, detail="High risk must start above medium risk")
+    out["updated_by"] = current_user.username
+    out["updated_at"] = _adm_dt.now(_adm_tz.utc).isoformat()
+    _save_json(DETECTION_SETTINGS_FILE, out)
+    print("[SETTINGS]", current_user.username, "saved detection settings")
+    return {"detection": {k: out[k] for k in DETECTION_FIELDS}}
+
+
+@app.post("/admin/settings/detection/reset")
+def reset_detection_settings(current_user: User = Depends(get_current_user)):
+    _admin_only(current_user)
+    if os.path.isfile(DETECTION_SETTINGS_FILE):
+        os.remove(DETECTION_SETTINGS_FILE)
+    return {"detection": _detection_settings()}
+
+
+@app.put("/admin/settings/band")
+def save_band_settings(request: dict, current_user: User = Depends(get_current_user)):
+    _admin_only(current_user)
+    data = _app_settings()
+    band = dict(data.get("band") or {})
+    if "key" in (request or {}):
+        key = str(request.get("key") or "").strip()
+        if key and (len(key) < 8 or len(key) > 64 or not all(c.isalnum() or c in "-_" for c in key)):
+            raise HTTPException(status_code=400, detail="Band key: 8-64 letters, numbers, - or _")
+        band["key"] = key or None       # empty = back to the default key
+    if "hold_minutes" in (request or {}):
+        try:
+            hold = int(request.get("hold_minutes"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="'hold minutes' must be a number")
+        if hold < 0 or hold > 180:
+            raise HTTPException(status_code=400, detail="'hold minutes' must be between 0 and 180")
+        band["hold_minutes"] = hold
+    data["band"] = band
+    _save_json(APP_SETTINGS_FILE, data)
+    print("[SETTINGS]", current_user.username, "saved wristband settings")
+    return {"band": {"key": _band_key(), "hold_minutes": _band_hold(), "custom_key": bool(band.get("key"))}}
+
+
+class ClipCleanupRequest(BaseModel):
+    older_than_days: int
+
+
+@app.post("/admin/clips/cleanup")
+def cleanup_clips(request: ClipCleanupRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Deletes clip files older than N days. The events stay; they just lose their clip."""
+    _admin_only(current_user)
+    days = request.older_than_days
+    if days < 1 or days > 3650:
+        raise HTTPException(status_code=400, detail="Days must be between 1 and 3650")
+    cutoff = _adm_dt.now().timestamp() - days * 86400
+    deleted, freed = [], 0
+    if os.path.isdir(CLIPS_DIR):
+        for name in os.listdir(CLIPS_DIR):
+            full = os.path.join(CLIPS_DIR, name)
+            if os.path.isfile(full) and os.path.getmtime(full) < cutoff:
+                size = os.path.getsize(full)
+                try:
+                    os.remove(full)
+                except OSError:
+                    continue
+                deleted.append(name)
+                freed += size
+    if deleted:
+        for e in db.query(InjuryEvent).filter(InjuryEvent.clip_path.in_(deleted)).all():
+            e.clip_path = None
+        db.commit()
+    print("[SETTINGS]", current_user.username, "deleted", len(deleted), "clips older than", days, "days")
+    return {"deleted": len(deleted), "freed_mb": round(freed / 1048576, 1), "clips": _clips_info()}
+
+
+@app.get("/admin/backup")
+def admin_backup(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Everything as one JSON file: events, teams, players, matches and the saved JSON stores."""
+    _admin_only(current_user)
+    def plain(obj, fields):
+        return {f: getattr(obj, f, None) for f in fields}
+    stores = {}
+    out_dir = os.path.join(PROJECT_ROOT, "output")
+    if os.path.isdir(out_dir):
+        for name in sorted(os.listdir(out_dir)):
+            if name.endswith(".json") and name not in ("detector_status.json",):
+                stores[name] = _load_json(os.path.join(out_dir, name), None)
+    data = {
+        "exported_at": _adm_dt.now(_adm_tz.utc).isoformat(),
+        "exported_by": current_user.username,
+        "teams": [plain(t, ("id", "name")) for t in db.query(Team).all()],
+        "players": [plain(p, ("id", "name", "jersey_number", "team_id")) for p in db.query(Player).all()],
+        "matches": [plain(m, ("id", "name", "video_source", "date", "team_a_id", "team_b_id")) for m in db.query(MatchSession).all()],
+        "events": [event_to_dict(e) for e in db.query(InjuryEvent).order_by(InjuryEvent.id).all()],
+        "stores": stores,
+    }
+    name = "athleteguard-backup-" + _adm_dt.now().strftime("%Y%m%d-%H%M") + ".json"
+    return _AdmJSON(content=_json.loads(_json.dumps(data, default=str)), headers={"Content-Disposition": 'attachment; filename="' + name + '"'})

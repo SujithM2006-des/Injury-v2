@@ -79,6 +79,26 @@ OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
 CLIPS_DIR = os.path.join(OUTPUT_DIR, "clips")
 os.makedirs(CLIPS_DIR, exist_ok=True)
 
+# ---- settings from the admin Settings page (output/detection_settings.json) ----
+# Missing file or missing value = the default written next to each setting below.
+import json as _ds_json
+try:
+    with open(os.path.join(OUTPUT_DIR, "detection_settings.json"), "r", encoding="utf-8") as _f:
+        _DS = _ds_json.load(_f)
+    if not isinstance(_DS, dict):
+        _DS = {}
+    print("[SETTINGS] Detection settings loaded from the admin Settings page")
+except (OSError, ValueError):
+    _DS = {}
+
+
+def _ds(name, default):
+    value = _DS.get(name, default)
+    try:
+        return type(default)(value)
+    except (TypeError, ValueError):
+        return default
+
 SOURCE_CONFIG = {
     "file": VIDEO_FILE,
     "webcam": 0,
@@ -102,7 +122,7 @@ CLIP_PRE_SECONDS = 3             # seconds of video kept BEFORE the fall
 CLIP_POST_SECONDS = 3            # seconds recorded AFTER the fall
 CLIP_WIDTH = 854                 # clips are downscaled to this width (saves memory)
 
-FALL_COOLDOWN_SECONDS = 5        # same player can trigger a new fall after this
+FALL_COOLDOWN_SECONDS = _ds("fall_cooldown_seconds", 5)        # same player can trigger a new fall after this
 COLLISION_COOLDOWN_SECONDS = 5   # same pair can trigger a new collision after this
 
 # ---- one fall = one event, even when the tracker renumbers the player ----
@@ -132,7 +152,7 @@ REQUIRE_LEGS_FOR_FALL = True     # knees or ankles must be visible to judge a fa
 # ---- Gemini second opinion (needs GEMINI_API_KEY, see gemini_verifier.py) ----
 # Each saved fall's raw frames are checked by Gemini: confident false alarms are deleted,
 # and a surer jersey read from Gemini replaces our player.
-GEMINI_CHECK = True
+GEMINI_CHECK = _ds("gemini_check", True)
 
 # ---- Gemini injury check (own key: GEMINI_INJURY_API_KEY, see gemini_injury.py) ----
 # OFF unless .env has GEMINI_INJURY_CHECK=1, so normal runs are unchanged.
@@ -300,20 +320,20 @@ DEBUG_FALL_METRICS = True
 SHOW_STATUS_TEXT = False
 
 # PLAYER VALIDATION SETTINGS
-PERSON_CONFIDENCE = 0.45
-KEYPOINT_CONFIDENCE = 0.35
+PERSON_CONFIDENCE = _ds("person_confidence", 0.45)
+KEYPOINT_CONFIDENCE = _ds("keypoint_confidence", 0.35)
 MIN_KEYPOINTS = 5
 MIN_BOX_HEIGHT = 35
 CONFIRM_FRAMES = 2            # v1: 3 — players confirmed faster
 CONTINUE_CONFIDENCE = 0.30
 
 # FALL DETECTION SETTINGS (MOVEMENT-BASED)
-FALL_DOWNWARD_RATIO = 0.18
-FALL_ANGLE_THRESHOLD = 60
+FALL_DOWNWARD_RATIO = _ds("fall_downward_ratio", 0.18)
+FALL_ANGLE_THRESHOLD = _ds("fall_angle", 60)
 
 # FALL DETECTION SETTINGS (STATIC POSTURE-BASED)
-STATIC_FALL_ANGLE_THRESHOLD = 55
-ASPECT_RATIO_THRESHOLD = 1.2
+STATIC_FALL_ANGLE_THRESHOLD = _ds("lying_angle", 55)
+ASPECT_RATIO_THRESHOLD = _ds("lying_aspect_ratio", 1.2)
 POSTURE_CONFIRM_FRAMES = 1    # v1: 2 — quick falls are no longer missed
 
 posture_streak = {}
@@ -610,9 +630,9 @@ def calculate_region_movement(history):
 
 # RISK CALCULATION (MOVEMENT-BASED)
 def calculate_risk(movement):
-    if movement < 12:
+    if movement < _ds("risk_medium_from", 12.0):
         return "LOW"
-    elif movement < 22:
+    elif movement < _ds("risk_high_from", 22.0):
         return "MEDIUM"
     else:
         return "HIGH"
