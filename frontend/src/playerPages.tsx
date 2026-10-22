@@ -7,12 +7,12 @@
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { CalendarDays, CheckCircle2, Download, ExternalLink, FileText, HeartPulse, Lock, Shield } from 'lucide-react'
+import { CalendarDays, CheckCircle2, Download, ExternalLink, FileText, HeartPulse, Lock, Shield, ShieldAlert, ShieldCheck, Timer, Watch } from 'lucide-react'
 import { useAuth } from './auth'
 import { getMe } from './api/services'
 import { normalizeApiError } from './api/client'
 import { useAssessments, useEvents, useInjuryHistory } from './queries'
-import type { InjuryEvent } from './types'
+import type { InjuryEvent, RiskLevel } from './types'
 import type { AssessmentDto } from './api/dto'
 import { Badge, Card, EmptyState, ErrorState, Na, PageHeader, RiskBadge, SafetyMeasures, Skeleton, btnS } from './ui'
 import { EventLine, PossibleInjuries, PreviousInjuries, ReportsPage, ROLE_ACCESS, STATUS_TONE, btnSm, fmtDate, fmtVideo } from './pages'
@@ -76,6 +76,147 @@ function FallList({ list, loading, error, retry, emptyTitle, emptyText }: { list
   return <div className="space-y-3">{list.map((e) => <FallCard key={e.id} e={e} review={reviews.get(e.id)} />)}</div>
 }
 
+/* ---------- Dashboard helpers ---------- */
+const RANK: Record<RiskLevel, number> = { LOW: 1, MEDIUM: 2, HIGH: 3 }
+const RISK_FILL: Record<RiskLevel, string> = { HIGH: '#ef4444', MEDIUM: '#f59e0b', LOW: '#22c55e' }
+const worst = (list: InjuryEvent[]): RiskLevel | null =>
+  list.reduce<RiskLevel | null>((w, e) => (e.risk && (!w || RANK[e.risk] > RANK[w]) ? e.risk : w), null)
+
+type Zone = 'head' | 'torso' | 'hip' | 'rArm' | 'lArm' | 'rLeg' | 'lLeg'
+/** Body area text from the detector ("RIGHT LEG", "Left knee", "Head") -> body map zones. */
+function zonesOf(region: string | null): Zone[] {
+  if (!region) return []
+  const r = region.toLowerCase()
+  const side = r.includes('left') ? 'l' : r.includes('right') ? 'r' : null
+  const both = (a: Zone, b: Zone): Zone[] => (side === 'r' ? [a] : side === 'l' ? [b] : [a, b])
+  if (/head|face|neck|skull|jaw|eye|nose/.test(r)) return ['head']
+  if (/hip|pelvis|groin/.test(r)) return ['hip']
+  if (/arm|shoulder|elbow|wrist|hand|finger|collar/.test(r)) return both('rArm', 'lArm')
+  if (/leg|knee|ankle|thigh|foot|shin|calf|hamstring|toe|heel/.test(r)) return both('rLeg', 'lLeg')
+  if (/chest|back|torso|rib|abdomen|spine|trunk|stomach/.test(r)) return ['torso']
+  return []
+}
+
+/** "1-3 weeks", "2 days", "4-12 weeks" -> the upper number of days (14, 2, 84). */
+function restDays(rest: string | null | undefined): number | null {
+  if (!rest) return null
+  const nums = rest.match(/\d+(\.\d+)?/g)
+  if (!nums) return null
+  const n = Math.max(...nums.map(Number))
+  const r = rest.toLowerCase()
+  return Math.round(n * (r.includes('month') ? 30 : r.includes('week') ? 7 : 1))
+}
+
+/** Same colour rules as the wristband during a match, applied to the player's open falls. */
+function bandColour(open: InjuryEvent[]) {
+  const c = (l: RiskLevel) => open.filter((e) => e.risk === l).length
+  if (c('HIGH') > 0 || c('MEDIUM') >= 2) return { name: 'Red', hex: '#dc2626', text: 'Any high or 2+ medium falls', blink: true }
+  if (c('MEDIUM') === 1 || c('LOW') >= 3) return { name: 'Amber', hex: '#f59e0b', text: '1 medium or 3+ low falls', blink: false }
+  if (c('LOW') > 0) return { name: 'Green', hex: '#22c55e', text: '1–2 low falls', blink: false }
+  return { name: 'Blue', hex: '#2563eb', text: 'No open falls', blink: false }
+}
+
+function StatusBanner({ open, rest }: { open: InjuryEvent[]; rest: string | null }) {
+  const w = worst(open)
+  const s = w === 'HIGH' ? { cls: 'from-red-600 to-red-500', icon: ShieldAlert, title: 'Rest advised', text: `You have a high-risk fall waiting for medical review${rest ? `. Expected rest ${rest}.` : '.'} Do not train until medical staff clear you.` }
+    : w === 'MEDIUM' ? { cls: 'from-amber-500 to-orange-500', icon: ShieldAlert, title: 'Play with care', text: `A medium-risk fall needs a medical check${rest ? ` (expected rest ${rest})` : ''}. Tell medical staff if anything hurts.` }
+    : w === 'LOW' ? { cls: 'from-emerald-600 to-green-500', icon: ShieldCheck, title: 'Minor knocks only', text: 'Only low-risk falls are open. Follow the safety measures and report any pain.' }
+    : { cls: 'from-emerald-600 to-teal-500', icon: ShieldCheck, title: 'Fit to play', text: 'No open injury events. Keep it up.' }
+  const I = s.icon
+  return (
+    <div className={`mb-4 flex items-center gap-4 rounded-2xl bg-gradient-to-r ${s.cls} p-5 text-white shadow-sm`}>
+      <span className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-white/20"><I size={26} /></span>
+      <div className="min-w-0"><p className="text-lg font-bold">{s.title}</p><p className="text-sm text-white/90">{s.text}</p></div>
+    </div>
+  )
+}
+
+function BodyMap({ list }: { list: InjuryEvent[] }) {
+  const by = new Map<Zone, InjuryEvent[]>()
+  for (const e of list) for (const z of zonesOf(e.region)) by.set(z, [...(by.get(z) ?? []), e])
+  const fill = (z: Zone) => { const w = worst(by.get(z) ?? []); return w ? RISK_FILL[w] : '#e2e8f0' }
+  const tip = (z: Zone, label: string) => { const n = by.get(z)?.length ?? 0; return `${label}: ${n} fall${n === 1 ? '' : 's'}` }
+  const hit = [...by.entries()].sort((a, b) => b[1].length - a[1].length)
+  const LABEL: Record<Zone, string> = { head: 'Head', torso: 'Chest / back', hip: 'Hip', rArm: 'Right arm', lArm: 'Left arm', rLeg: 'Right leg', lLeg: 'Left leg' }
+  return (
+    <Card className="h-full">
+      <h2 className="font-semibold">Where you got hurt</h2>
+      <p className="text-xs text-slate-500">All your detected falls, coloured by the highest risk.</p>
+      <div className="mt-3 flex items-center gap-5">
+        <svg viewBox="0 0 120 230" className="h-56 w-auto shrink-0" role="img" aria-label="Body map">
+          <text x="10" y="12" fontSize="9" fill="#94a3b8">R</text><text x="104" y="12" fontSize="9" fill="#94a3b8">L</text>
+          <circle cx="60" cy="22" r="15" fill={fill('head')} stroke="#fff" strokeWidth="2"><title>{tip('head', 'Head')}</title></circle>
+          <rect x="38" y="40" width="44" height="62" rx="12" fill={fill('torso')} stroke="#fff" strokeWidth="2"><title>{tip('torso', 'Chest / back')}</title></rect>
+          <rect x="40" y="100" width="40" height="22" rx="8" fill={fill('hip')} stroke="#fff" strokeWidth="2"><title>{tip('hip', 'Hip')}</title></rect>
+          <rect x="18" y="42" width="17" height="72" rx="8" fill={fill('rArm')} stroke="#fff" strokeWidth="2"><title>{tip('rArm', 'Right arm')}</title></rect>
+          <rect x="85" y="42" width="17" height="72" rx="8" fill={fill('lArm')} stroke="#fff" strokeWidth="2"><title>{tip('lArm', 'Left arm')}</title></rect>
+          <rect x="40" y="122" width="18" height="98" rx="8" fill={fill('rLeg')} stroke="#fff" strokeWidth="2"><title>{tip('rLeg', 'Right leg')}</title></rect>
+          <rect x="62" y="122" width="18" height="98" rx="8" fill={fill('lLeg')} stroke="#fff" strokeWidth="2"><title>{tip('lLeg', 'Left leg')}</title></rect>
+        </svg>
+        <div className="min-w-0 flex-1 space-y-2">
+          {hit.length === 0 ? <p className="text-sm text-slate-500">No body area recorded yet.</p>
+            : hit.map(([z, l]) => { const w = worst(l); return (
+              <div key={z} className="flex items-center gap-2 text-sm">
+                <span className="h-3 w-3 shrink-0 rounded-full" style={{ background: w ? RISK_FILL[w] : '#e2e8f0' }} />
+                <span className="flex-1 font-medium text-slate-700">{LABEL[z]}</span>
+                <span className="text-slate-500">{l.length}×</span>
+              </div>) })}
+          <div className="flex flex-wrap gap-3 border-t border-slate-100 pt-2 text-[11px] text-slate-500">
+            {(['HIGH', 'MEDIUM', 'LOW'] as RiskLevel[]).map((r) => <span key={r} className="flex items-center gap-1"><span className="h-2 w-2 rounded-full" style={{ background: RISK_FILL[r] }} />{r[0] + r.slice(1).toLowerCase()}</span>)}
+          </div>
+        </div>
+      </div>
+    </Card>
+  )
+}
+
+function RecoveryRing({ from }: { from?: InjuryEvent }) {
+  const total = restDays(from?.aiInjury?.rest)
+  const start = from ? new Date(from.timestamp) : null
+  const day = start ? Math.max(1, Math.floor((Date.now() - +start) / 86400000) + 1) : 0
+  const pct = total ? Math.min(1, day / total) : 0
+  const done = !!total && day > total
+  const R = 42, C = 2 * Math.PI * R
+  return (
+    <Card className="h-full">
+      <h2 className="flex items-center gap-2 font-semibold"><Timer size={18} className="text-amber-600" />Recovery</h2>
+      {!from || !total ? <p className="mt-3 text-sm text-slate-500">No rest period right now.</p> : (
+        <div className="mt-3 flex items-center gap-5">
+          <svg viewBox="0 0 100 100" className="h-28 w-28 shrink-0 -rotate-90">
+            <circle cx="50" cy="50" r={R} fill="none" stroke="#f1f5f9" strokeWidth="10" />
+            <circle cx="50" cy="50" r={R} fill="none" stroke={done ? '#22c55e' : '#f59e0b'} strokeWidth="10" strokeLinecap="round" strokeDasharray={C} strokeDashoffset={C * (1 - pct)} />
+            <text x="50" y="50" transform="rotate(90 50 50)" textAnchor="middle" dominantBaseline="central" fontSize="18" fontWeight="700" fill="#0f172a">{Math.round(pct * 100)}%</text>
+          </svg>
+          <div className="min-w-0">
+            <p className="text-2xl font-bold text-navy-900">{done ? 'Rest done' : `Day ${day}`}<span className="text-base font-medium text-slate-500">{done ? '' : ` of ~${total}`}</span></p>
+            <p className="text-sm text-slate-500">Expected rest {from.aiInjury?.rest} · since {new Date(from.timestamp).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}</p>
+            <p className="mt-1 text-xs text-slate-500">{done ? 'Get cleared by medical staff before playing.' : `About ${total - day} day(s) left. Medical staff decide when you return.`}</p>
+          </div>
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function BandCard({ open }: { open: InjuryEvent[] }) {
+  const b = bandColour(open)
+  return (
+    <Card className="h-full">
+      <h2 className="flex items-center gap-2 font-semibold"><Watch size={18} className="text-sky-600" />Your wristband</h2>
+      <div className="mt-3 flex items-center gap-4">
+        <div className="relative grid h-24 w-14 shrink-0 place-items-center rounded-2xl bg-slate-800 shadow-inner">
+          <span className={`h-8 w-8 rounded-full ${b.blink ? 'animate-pulse' : ''}`} style={{ background: b.hex, boxShadow: `0 0 18px 4px ${b.hex}99` }} />
+        </div>
+        <div className="min-w-0">
+          <p className="text-2xl font-bold" style={{ color: b.hex }}>{b.name}{b.blink ? ' (blinking)' : ''}</p>
+          <p className="text-sm text-slate-500">{b.text}</p>
+          <p className="mt-1 text-xs text-slate-400">Worked out from your open injury events, with the same rules the band uses.</p>
+        </div>
+      </div>
+    </Card>
+  )
+}
+
 /* ---------- Dashboard ---------- */
 export function PlayerDashboard() {
   const { user } = useAuth()
@@ -99,12 +240,21 @@ export function PlayerDashboard() {
   return (
     <>
       <PageHeader back={false} title="Player dashboard" crumbs={[{ label: 'Dashboard' }]} actions={<Link to="/player/reports" className={btnS}><FileText size={16} />My report</Link>} />
+      {ev.data && <StatusBanner open={current} rest={current.find((e) => e.aiInjury?.rest)?.aiInjury?.rest ?? null} />}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         {KPI.map(([k, v, t]) => <Card key={k}><p className="text-xs text-slate-500">{k}</p>{ev.isLoading ? <Skeleton className="mt-2 h-8 w-12" /> : <p className={`mt-1 truncate font-bold ${typeof v === 'string' ? 'text-2xl' : 'text-3xl'} ${t ?? ''}`} title={typeof v === 'string' ? v : undefined}><Na v={v} /></p>}</Card>)}
       </div>
       <p className="mt-2 text-xs text-slate-500">{dev ? 'Metrics are shown only when real backend data is available.' : `Welcome, ${name}. You see only your own injury data.`}</p>
 
-      <div className="mt-5">
+      {ev.data && (
+        <div className="mt-5 grid gap-4 lg:grid-cols-3">
+          <BodyMap list={all} />
+          <RecoveryRing from={current.find((e) => e.aiInjury?.rest)} />
+          <BandCard open={current} />
+        </div>
+      )}
+
+      <div className="mt-4">
         <Card>
           <div className="flex items-center justify-between"><h2 className="font-semibold">Current injury events</h2>{all.length > 0 && <Link to="/player/events" className={btnSm}>View all</Link>}</div>
           {ev.isError ? <ErrorState title="Unable to load your injury events" text={normalizeApiError(ev.error)} onRetry={() => ev.refetch()} />
