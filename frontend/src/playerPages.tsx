@@ -25,6 +25,24 @@ const useMe = () => {
 
 const newestFirst = (a: InjuryEvent, b: InjuryEvent) => +new Date(b.timestamp) - +new Date(a.timestamp)
 
+/** Match name without the date the backend adds ("fall_test - 19 Oct 2026 17:30" -> "fall_test"). */
+const baseMatch = (m: string | null) => (m ?? '').replace(/\s+-\s+\d{1,2}\s+\w{3}\s+\d{4}.*$/, '').trim().toLowerCase()
+
+/** The same match video analysed again gives the same fall again (same moment in the video,
+ *  same body area). Keep only the newest of those, so every clip is shown once. */
+function uniqueFalls(list: InjuryEvent[]): InjuryEvent[] {
+  const kept: InjuryEvent[] = []
+  for (const e of [...list].sort(newestFirst)) {
+    const dup = e.videoTimeSec !== null && kept.some((k) => k.videoTimeSec !== null
+      && Math.abs(k.videoTimeSec - e.videoTimeSec!) <= 2
+      && baseMatch(k.matchName) === baseMatch(e.matchName)
+      && (k.region ?? '').toLowerCase() === (e.region ?? '').toLowerCase()
+      && k.eventType.toUpperCase() === e.eventType.toUpperCase())
+    if (!dup) kept.push(e)
+  }
+  return kept
+}
+
 /** Assessment outcome per event (players get the status only, never the clinical notes). */
 const useReviewByEvent = () => {
   const a = useAssessments()
@@ -225,7 +243,7 @@ export function PlayerDashboard() {
   const h = useInjuryHistory()
   const dev = !!user?.dev
 
-  const all = [...(ev.data ?? [])].sort(newestFirst)
+  const all = uniqueFalls(ev.data ?? [])
   const current = all.filter((e) => !e.resolved)
   const restFrom = current.find((e) => e.aiInjury?.rest) ?? all.find((e) => e.aiInjury?.rest)
   const name = me.data?.playerName ?? user?.name ?? 'Player'
@@ -285,7 +303,7 @@ export function PlayerProfile() {
 
   const d = me.data
   const name = d?.playerName ?? user.name
-  const events = ev.data ?? []
+  const events = uniqueFalls(ev.data ?? [])
 
   const Info = ({ label, value }: { label: string; value: ReactNode }) => (
     <div className="flex items-center justify-between gap-4 border-b border-slate-100 py-3.5 last:border-0">
@@ -360,7 +378,7 @@ export function PlayerHistoryPage() {
   const { user } = useAuth()
   const me = useMe()
   const ev = useEvents()
-  const past = (ev.data ?? []).filter((e) => e.resolved).sort(newestFirst)
+  const past = uniqueFalls(ev.data ?? []).filter((e) => e.resolved)
   const name = me.data?.playerName ?? user?.name ?? 'Player'
 
   return (
@@ -379,7 +397,7 @@ export function PlayerHistoryPage() {
 /* ---------- Events: current (not yet reviewed) injury events ---------- */
 export function PlayerEvents() {
   const ev = useEvents()
-  const current = (ev.data ?? []).filter((e) => !e.resolved).sort(newestFirst)
+  const current = uniqueFalls(ev.data ?? []).filter((e) => !e.resolved)
   return (
     <>
       <PageHeader title="My injury events" crumbs={[{ label: 'Events' }]} />

@@ -1,13 +1,38 @@
 import { useQuery } from '@tanstack/react-query'
 import { getAlertReads, getAssessments, getDetectorProgress, getEvents, getInjuryHistory, getMatches, getPlayers, getTeams } from './api/services'
 import { devMode } from './api/client'
+import type { InjuryEvent } from './types'
 
 // In developer preview there is no login, so nothing is fetched.
 const on = () => !devMode.get()
 
+/** Match name without the date the backend adds ("fall_test - 19 Oct 2026 17:30" -> "fall_test"). */
+const baseMatch = (m: string | null) => (m ?? '').replace(/\s+-\s+\d{1,2}\s+\w{3}\s+\d{4}.*$/, '').trim().toLowerCase()
+
+/** True when two events are the same fall from the same match video analysed again:
+ *  same video, same moment (within 2 s), same body area and type, and not two different players. */
+const sameFall = (a: InjuryEvent, b: InjuryEvent) =>
+  a.videoTimeSec !== null && b.videoTimeSec !== null
+  && Math.abs(a.videoTimeSec - b.videoTimeSec) <= 2
+  && baseMatch(a.matchName) === baseMatch(b.matchName)
+  && (a.region ?? '').toLowerCase() === (b.region ?? '').toLowerCase()
+  && a.eventType.toUpperCase() === b.eventType.toUpperCase()
+  && !(a.player.playerId !== null && b.player.playerId !== null && a.player.playerId !== b.player.playerId)
+
+/** Every clip once: when a fall was saved again (re-run of the same video, maybe with a
+ *  different risk), only the newest copy is kept. Nothing is deleted in the database. */
+export function uniqueEvents(list: InjuryEvent[]): InjuryEvent[] {
+  const newest = [...list].sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp))
+  const kept: InjuryEvent[] = []
+  for (const e of newest) if (!kept.some((k) => sameFall(k, e))) kept.push(e)
+  const keep = new Set(kept.map((e) => e.id))
+  return list.filter((e) => keep.has(e.id)) // original order
+}
+
 // Live data: events refresh every 3 s (same as the old dashboard), teams every 5 s, matches every 10 s.
+// Every page gets the events from here, so repeated clips are removed for every user.
 export const useEvents = (matchId?: number | null) =>
-  useQuery({ queryKey: ['events', matchId ?? 'all'], queryFn: () => getEvents(matchId), refetchInterval: 3000, enabled: on() })
+  useQuery({ queryKey: ['events', matchId ?? 'all'], queryFn: () => getEvents(matchId), select: uniqueEvents, refetchInterval: 3000, enabled: on() })
 
 export const useTeams = () => useQuery({ queryKey: ['teams'], queryFn: getTeams, refetchInterval: 5000, enabled: on() })
 
