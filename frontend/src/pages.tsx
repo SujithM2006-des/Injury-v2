@@ -661,11 +661,10 @@ export function Login() {
         </div>
       </header>
 
-      {/* hero: stadium, player #10, login card */}
+      {/* hero: stadium photo (frontend/public/login-bg.jpg), login card */}
       <section id="top" className="relative overflow-hidden bg-navy-950">
-        <StadiumBackdrop className="absolute inset-0 h-full w-full" />
-        <div aria-hidden="true" className="absolute inset-0 bg-gradient-to-r from-navy-950/90 via-navy-950/30 to-navy-950/40" />
-        <FootballerBack className="pointer-events-none absolute bottom-0 left-[51%] hidden h-[84%] -translate-x-1/2 lg:block" />
+        <img src="/login-bg.jpg" alt="" aria-hidden="true" className="absolute inset-0 h-full w-full object-cover object-[50%_25%]" />
+        <div aria-hidden="true" className="absolute inset-0 bg-navy-950/60 lg:bg-transparent lg:bg-gradient-to-r lg:from-navy-950/75 lg:via-navy-950/5 lg:to-navy-950/25" />
         <div className="relative mx-auto grid min-h-[600px] max-w-7xl items-center gap-10 px-4 py-14 sm:px-6 lg:grid-cols-[1fr_1fr] xl:grid-cols-[1.15fr_1fr]">
           <div className="lg:pb-10">
             <p className="font-display text-3xl font-bold tracking-wide text-sky-400">ATHLETE<span className="text-brand-500">GUARD</span></p>
@@ -743,12 +742,8 @@ export function Login() {
               ))}
             </ol>
           </div>
-          <div className="relative h-[420px] overflow-hidden rounded-3xl shadow-2xl shadow-navy-900/30">
-            <StadiumBackdrop className="absolute inset-0 h-full w-full" />
-            <FootballerBack number={7} className="absolute bottom-0 left-[6%] h-[78%] opacity-90" />
-            <FootballerBack number={9} className="absolute bottom-0 right-[4%] h-[80%] opacity-90" />
-            <FootballerBack number={10} className="absolute bottom-0 left-1/2 h-[92%] -translate-x-1/2" />
-            <p className="absolute right-6 top-6 rotate-[-8deg] font-display text-3xl font-semibold italic leading-tight text-white/90">Safer.<br />Stronger.<br />Together.</p>
+          <div className="relative aspect-[1376/768] w-full self-center overflow-hidden rounded-3xl bg-navy-950 shadow-2xl shadow-navy-900/30">
+            <img src="/team-bg.jpg" alt="Players number 7, 10 and 9 on a floodlit pitch: Safer. Stronger. Together." className="absolute inset-0 h-full w-full object-cover" />
           </div>
         </div>
       </section>
@@ -1577,6 +1572,23 @@ function TeamsHub() {
   const [registerPlayer, setRegisterPlayer] = useState(false)
   const admin = user?.role === 'ADMIN'
   const title = user?.role === 'COACH' || user?.role === 'OWNER' ? 'Team & Players' : 'Teams & Players'
+  // HIGH / MEDIUM / LOW events per player (from the injury events this login can see)
+  const evAll = useEvents()
+  const riskOf = new Map<number, { HIGH: number; MEDIUM: number; LOW: number }>()
+  for (const e of evAll.data ?? []) {
+    const pid = e.player.playerId
+    if (pid === null || !e.risk) continue
+    const c = riskOf.get(pid) ?? { HIGH: 0, MEDIUM: 0, LOW: 0 }
+    c[e.risk] += 1
+    riskOf.set(pid, c)
+  }
+  const riskCounts = (ids: number[]) => ids.reduce((s, id) => { const c = riskOf.get(id); return c ? { HIGH: s.HIGH + c.HIGH, MEDIUM: s.MEDIUM + c.MEDIUM, LOW: s.LOW + c.LOW } : s }, { HIGH: 0, MEDIUM: 0, LOW: 0 })
+  const RiskBadges = ({ c }: { c: { HIGH: number; MEDIUM: number; LOW: number } }) => (c.HIGH + c.MEDIUM + c.LOW === 0 ? <span className="text-slate-400">—</span> : (
+    // only the highest level: high hides medium and low, medium hides low
+    c.HIGH > 0 ? <Badge tone="red">{c.HIGH} high</Badge>
+      : c.MEDIUM > 0 ? <Badge tone="amber">{c.MEDIUM} medium</Badge>
+      : <Badge tone="green">{c.LOW} low</Badge>
+  ))
 
   const teams = t.data ?? []
   const team = teams.find((x) => x.id === selected) ?? teams[0]
@@ -1622,7 +1634,9 @@ function TeamsHub() {
                   <div className="mt-4 grid grid-cols-4 gap-2 border-t border-slate-100 pt-3">
                     <Mini l="Players" v={x.playerCount} />
                     <Mini l="Incidents" v={x.injuryEvents} />
-                    <Mini l="High risk" v={x.highRiskEvents} tone={x.highRiskEvents ? 'text-red-700' : 'text-slate-400'} />
+                    {(() => { const c = riskCounts(x.players.map((p) => p.id)); return (
+                      <Mini l="Risk H · M · L" v={<><span className={c.HIGH ? 'text-red-700' : 'text-slate-400'}>{c.HIGH}</span><span className="text-slate-300"> · </span><span className={c.MEDIUM ? 'text-amber-600' : 'text-slate-400'}>{c.MEDIUM}</span><span className="text-slate-300"> · </span><span className={c.LOW ? 'text-green-700' : 'text-slate-400'}>{c.LOW}</span></>} />
+                    ) })()}
                     <Mini l="Affected" v={withIncidents} tone={withIncidents ? 'text-amber-600' : 'text-slate-400'} />
                   </div>
                 </button>
@@ -1643,17 +1657,17 @@ function TeamsHub() {
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">
                 <thead className="bg-slate-50 text-xs uppercase text-slate-500">
-                  <tr><th className={th + ' w-16'}>#</th><th className={th}>Player</th>{searching && <th className={th}>Team</th>}<th className={th}>Injury events</th><th className={th}>High risk</th><th className={th + ' text-right'}>Profile</th></tr>
+                  <tr><th className={th + ' w-16'}>#</th><th className={th}>Player</th>{searching && <th className={th}>Team</th>}<th className={th}>Injury events</th><th className={th}>Risk levels</th><th className={th + ' text-right'}>Profile</th></tr>
                 </thead>
                 <tbody>
                   {rows.map((p) => (
                     <Fragment key={p.id}>
-                      <tr className={`border-t border-slate-100 ${open === p.id ? 'bg-slate-50' : p.highRiskEvents > 0 ? 'bg-red-50/40 hover:bg-red-50' : 'hover:bg-slate-50'}`}>
+                      <tr className={`border-t border-slate-100 ${open === p.id ? 'bg-slate-50' : ((c) => c.HIGH > 0 ? 'bg-red-50/40 hover:bg-red-50' : c.MEDIUM > 0 ? 'bg-amber-50/60 hover:bg-amber-50' : c.LOW > 0 ? 'bg-green-50/60 hover:bg-green-50' : 'hover:bg-slate-50')(riskOf.get(p.id) ?? { HIGH: p.highRiskEvents, MEDIUM: 0, LOW: 0 })}`}>
                         <td className="px-4 py-3"><span className="grid h-8 w-8 place-items-center rounded-full bg-slate-100 text-xs font-bold text-slate-700">{p.jersey}</span></td>
                         <td className="px-4 py-3"><PlayerToggle open={open === p.id} onClick={() => setOpen(open === p.id ? null : p.id)}>{p.name}</PlayerToggle></td>
                         {searching && <td className="px-4 py-3 text-slate-600">{p.teamName}</td>}
                         <td className="px-4 py-3">{p.injuryEvents > 0 ? <span className="font-semibold">{p.injuryEvents}</span> : <span className="text-slate-400">0</span>}</td>
-                        <td className="px-4 py-3">{p.highRiskEvents > 0 ? <Badge tone="red">{p.highRiskEvents} high</Badge> : <span className="text-slate-400">—</span>}</td>
+                        <td className="px-4 py-3"><RiskBadges c={riskOf.get(p.id) ?? { HIGH: 0, MEDIUM: 0, LOW: 0 }} /></td>
                         <td className="px-4 py-3 text-right"><Link to={`/players/${p.id}`} className={btnSm}><ExternalLink size={14} />Open</Link></td>
                       </tr>
                       {open === p.id && <tr><td colSpan={searching ? 6 : 5} className="p-0"><PlayerHistory playerId={p.id} name={p.name} /></td></tr>}
