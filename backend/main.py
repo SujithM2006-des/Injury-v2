@@ -2428,3 +2428,146 @@ def delete_injury_history(record_id: int, current_user: User = Depends(get_curre
     print("[HISTORY]", current_user.username, "deleted", record.get("injury"), "for", player.name)
 
     return {"message": "Injury deleted"}
+
+
+# ============================================
+# WRISTBAND - MATCH MODE v3 (AthleteGuard band / virtual_band.py)
+# GET /band/{player_id}/status?key=...   ->  HIGH / MEDIUM / LOW / NONE  (plain text, for the ESP32)
+# GET /band/{player_id}/summary?key=...  ->  the same with the counts and the players (JSON, for virtual_band.py)
+# player_id 0 = every player (team doctor's band, includes Unidentified falls).
+# The band shows the level for the WHOLE current match and only gets worse until the match is over:
+#   any high-risk fall, or 2+ medium      -> HIGH
+#   1 medium fall, or 3+ low falls        -> MEDIUM
+#   1-2 low falls                          -> LOW
+#   no falls                               -> NONE
+# Re-running the same video reuses the falls saved by the earlier run (duplicate check), so those
+# falls count too, as soon as the video reaches their time. Gemini false alarms do not count.
+# BAND_HOLD_AFTER_MATCH_MIN minutes after the video finishes the band goes back to NONE.
+# ============================================
+from datetime import datetime as _band_dt, timedelta as _band_td, timezone as _band_tz
+from fastapi.responses import PlainTextResponse as _BandText
+
+BAND_KEY = os.environ.get("ATHLETEGUARD_BAND_KEY", "athleteguard-band-key")
+BAND_HOLD_AFTER_MATCH_MIN = 10
+BAND_STALE_SECONDS = 30
+
+
+def _band_time(value):
+    try:
+        t = _band_dt.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=_band_tz.utc)
+
+
+def _band_match(db):
+    """(match_id, match_name, state, video_now). state: running / finished / over.
+    video_now = seconds into the video while it is running (None = whole video)."""
+    reader = globals().get("_read_detector_status")
+    status = reader() if reader else None
+    now = _band_dt.now(_band_tz.utc)
+    if status and (status.get("info") or {}).get("match_id"):
+        info = status.get("info") or {}
+        progress = status.get("progress") or {}
+        last_seen = _band_time(status.get("last_seen"))
+        state = status.get("state")
+        if state in ("starting", "running") and last_seen and (now - last_seen).total_seconds() <= BAND_STALE_SECONDS:
+            video_now = None
+            try:
+                if progress.get("frame") is not None and info.get("fps"):
+                    video_now = float(progress["frame"]) / float(info["fps"])
+            except (TypeError, ValueError, ZeroDivisionError):
+                video_now = None
+            return info.get("match_id"), info.get("match_name"), "running", video_now
+        ended = _band_time(status.get("finished_at")) or last_seen
+        if ended and now - ended > _band_td(minutes=BAND_HOLD_AFTER_MATCH_MIN):
+            return info.get("match_id"), info.get("match_name"), "over", None
+        return info.get("match_id"), info.get("match_name"), "finished", None
+    # no detector status yet: use the newest match
+    m = db.query(MatchSession).order_by(MatchSession.date.desc()).first()
+    return (m.id, m.name, "running", None) if m else (None, None, "over", None)
+
+
+def _band_events(db, match_id, video_now):
+    """Falls of this match + falls of earlier runs of the same video (reused by the duplicate check)."""
+    rows = db.query(InjuryEvent).filter(InjuryEvent.match_session_id == match_id).all()
+    key_of = globals().get("_video_key")
+    match = db.query(MatchSession).filter(MatchSession.id == match_id).first()
+    key = key_of(match) if (key_of and match) else None
+    if key:
+        seen = {e.id for e in rows}
+        earlier = (db.query(InjuryEvent)
+                   .filter(InjuryEvent.match_session_id.isnot(None),
+                           InjuryEvent.match_session_id != match_id,
+                           InjuryEvent.video_time_sec.isnot(None))
+                   .all())
+        for e in earlier:
+            if e.id in seen or key_of(e.match) != key:
+                continue
+            if video_now is not None and e.video_time_sec > video_now + 1:
+                continue      # the video has not reached this fall yet
+            rows.append(e)
+    return rows
+
+
+def _band_level(high, medium, low):
+    if high or medium >= 2:
+        return "HIGH"
+    if medium or low >= 3:
+        return "MEDIUM"
+    if low:
+        return "LOW"
+    return "NONE"
+
+
+_BAND_RANK = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "NONE": 0}
+
+
+def _band_summary(player_id, key, db):
+    if key != BAND_KEY:
+        raise HTTPException(status_code=403, detail="Wrong band key")
+    match_id, match_name, state, video_now = _band_match(db)
+    counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
+    per_player = {}            # player id (None = Unidentified) -> name, jersey, team, counts
+    if match_id and state != "over":
+        for e in _band_events(db, match_id, video_now):
+            if player_id and e.player_id != player_id:
+                continue
+            if (e.gemini_verdict or "") == "false_alarm":
+                continue
+            risk = (e.risk or "").upper()
+            if risk not in counts:
+                continue
+            counts[risk] += 1
+            row = per_player.get(e.player_id)
+            if row is None:
+                p = e.player if e.player_id is not None else None
+                row = {"player_id": e.player_id,
+                       "name": p.name if p is not None else "Unidentified player",
+                       "jersey_number": p.jersey_number if p is not None else None,
+                       "team": p.team.name if (p is not None and p.team is not None) else None,
+                       "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+                per_player[e.player_id] = row
+            row[risk] += 1
+    players = []
+    for row in per_player.values():
+        players.append({"player_id": row["player_id"], "name": row["name"], "jersey_number": row["jersey_number"],
+                        "team": row["team"], "level": _band_level(row["HIGH"], row["MEDIUM"], row["LOW"]),
+                        "falls": row["HIGH"] + row["MEDIUM"] + row["LOW"],
+                        "high": row["HIGH"], "medium": row["MEDIUM"], "low": row["LOW"]})
+    # worst first; Unidentified falls after named players with the same level
+    players.sort(key=lambda r: (-_BAND_RANK[r["level"]], r["player_id"] is None, -r["falls"], r["name"]))
+    level = _band_level(counts["HIGH"], counts["MEDIUM"], counts["LOW"])
+    return {"level": level, "falls": sum(counts.values()), "high": counts["HIGH"], "medium": counts["MEDIUM"],
+            "low": counts["LOW"], "match_id": match_id, "match_name": match_name, "match_state": state,
+            "players": players}
+
+
+@app.get("/band/{player_id}/status", response_class=_BandText)
+def band_status(player_id: int, key: str = Query(""), db: Session = Depends(get_db)):
+    return _band_summary(player_id, key, db)["level"]
+
+
+@app.get("/band/{player_id}/summary")
+def band_summary(player_id: int, key: str = Query(""), db: Session = Depends(get_db)):
+    return _band_summary(player_id, key, db)
