@@ -1161,6 +1161,7 @@ function FormModal({ cfg, open, onClose }: { cfg: NonNullable<Cfg['create']>; op
 }
 
 const th = 'px-4 py-3'
+const gridTable = 'border-collapse [&>thead>tr>th]:border [&>tbody>tr>td]:border [&>thead>tr>th]:border-slate-200 [&>tbody>tr>td]:border-slate-200 [&>thead>tr>th:first-child]:border-l-0 [&>tbody>tr>td:first-child]:border-l-0 [&>thead>tr>th:last-child]:border-r-0 [&>tbody>tr>td:last-child]:border-r-0 [&>thead>tr>th]:border-t-0 [&>thead>tr>th]:bg-slate-100 [&>thead>tr>th]:font-semibold [&>thead>tr>th]:tracking-wide [&>thead>tr>th]:text-slate-600'
 /** Footer with the number of rows. Every row is shown on one scrollable page (no page buttons). */
 function Pager({ count }: { count: number }) {
   return <div className="border-t p-3 text-sm text-slate-500">{count} result(s)</div>
@@ -1390,7 +1391,7 @@ export function ReportsPage() {
           <p className="ml-auto self-center text-xs text-slate-500">The PDF contains exactly the events listed below.</p>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
+          <table className={'w-full text-left text-sm ' + gridTable}>
             <thead className="sticky top-0 bg-slate-50 text-xs uppercase text-slate-500"><tr>{['Player', 'Event', 'Risk', 'Possible injury', 'Safety measures to be done', 'Match / time'].map((h) => <th key={h} className={th}>{h}</th>)}</tr></thead>
             <tbody>
               {ev.isLoading && [0, 1, 2].map((i) => <tr key={i}><td colSpan={6} className="px-4 py-3"><Skeleton /></td></tr>)}
@@ -1814,7 +1815,7 @@ function EventsList({ collisions, q, risk, type, match, identity, filtered }: { 
   const base = collisions ? '/collisions' : '/events'
   return (
     <>
-      <div className="overflow-x-auto"><table className="w-full text-left text-sm">
+      <div className="overflow-x-auto"><table className={'w-full text-left text-sm ' + gridTable}>
         <thead className="sticky top-0 bg-slate-50 text-xs uppercase text-slate-500"><tr>{cols.map((h) => <th key={h} className={th + (h === '#' ? ' w-12 text-center' : '')}>{h}</th>)}</tr></thead>
         <tbody>
           {ev.isLoading && [0, 1, 2].map((i) => <tr key={i}><td colSpan={7} className="px-4 py-3"><Skeleton /></td></tr>)}
