@@ -179,7 +179,54 @@ def open_video_source():
     return cap
 
 
-cap = open_video_source()
+# GPU BOOST: read frames in a background thread so the GPU never waits for the next frame.
+# Video files: every frame is kept (nothing skipped). Webcam / capture card: always the newest frame.
+import queue as _q
+import time as _time
+
+
+class _ThreadedCapture:
+    def __init__(self, cap, live):
+        self.cap = cap
+        self.live = live
+        self.q = _q.Queue(maxsize=2 if live else 64)
+        self.stopped = False
+        self.t = threading.Thread(target=self._run, daemon=True)
+        self.t.start()
+
+    def _run(self):
+        while not self.stopped:
+            ok, frame = self.cap.read()
+            if self.live and self.q.full():
+                try:
+                    self.q.get_nowait()
+                except _q.Empty:
+                    pass
+            self.q.put((ok, frame))
+            if not ok:
+                break
+
+    def read(self):
+        return self.q.get()
+
+    def get(self, prop):
+        return self.cap.get(prop)
+
+    def isOpened(self):
+        return self.cap.isOpened()
+
+    def release(self):
+        self.stopped = True
+        try:
+            while True:
+                self.q.get_nowait()
+        except _q.Empty:
+            pass
+        self.t.join(timeout=2)
+        self.cap.release()
+
+
+cap = _ThreadedCapture(open_video_source(), SOURCE_MODE in ("webcam", "capture_card"))
 
 fps = cap.get(cv2.CAP_PROP_FPS)
 total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -313,7 +360,7 @@ calibration_writer.writerow([
 event_log = []
 
 # DEBUG SETTINGS
-DEBUG_FALL_METRICS = True
+DEBUG_FALL_METRICS = False   # GPU BOOST: True prints every player every frame (slow)
 
 # On-screen status text ("NO PLAYER DETECTED", "NOT GAMEPLAY ...", "AI INJURY DETECTION v2 | match").
 # False = clean video (also in the saved clips). Detection itself is not affected.
@@ -1230,9 +1277,11 @@ while True:
         device=DEVICE,
         imgsz=INFER_IMGSZ,
         tracker=TRACKER_CONFIG,
+        half=(DEVICE == 0),   # GPU BOOST: FP16 on the GPU
     )
     result = results[0]
-    annotated_frame = result.plot()
+    # CLEAN OVERLAY: boxes + body landmarks only (no 'id:12 person 0.84' text)
+    annotated_frame = result.plot(labels=False, conf=False)
     player_boxes_this_frame = {}
     if (
         result.boxes is not None
@@ -1493,39 +1542,19 @@ while True:
                 else:
                     print("[INFO] Fall on track", track_id, "within cooldown — not saved again")
 
-            # ON-SCREEN LABELS
+            # ON-SCREEN LABELS (CLEAN OVERLAY): only "REGION · RISK" after a fall
             status = player_status[track_id]
             region = player_region[track_id]
             risk = player_risk[track_id]
-            movement = player_movement[track_id]
-            ident = track_identity.get(track_id)
-            if ident is not None:
-                label = display_text(ident["player_name"])
-                number = jersey_of(ident["player_id"])
-                if number is not None:
-                    label += " #" + str(number)
-                label += " [FACE]" if ident["method"] == "face" else " [JERSEY]"
-            else:
-                label = "PLAYER T" + str(track_id)
-            text_x = x1
-            text_y = max(y1 - 100, 30)
-            cv2.putText(
-                annotated_frame, label,
-                (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
-            )
             if status == "FALL" and fall_checks_allowed:
-                cv2.putText(
-                    annotated_frame, "REGION: " + region,
-                    (text_x, text_y + 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2
-                )
-                cv2.putText(
-                    annotated_frame, "RISK: " + risk,
-                    (text_x, text_y + 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2
-                )
-                cv2.putText(
-                    annotated_frame, "MOVEMENT: " + str(round(movement, 2)),
-                    (text_x, text_y + 100), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2
-                )
+                colour = {"HIGH": (0, 0, 230), "MEDIUM": (0, 165, 255), "LOW": (0, 170, 0)}.get(str(risk).upper(), (0, 0, 230))
+                text = display_text(str(region)).upper() + " | " + str(risk).upper()
+                font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
+                (tw, th), base = cv2.getTextSize(text, font, scale, thick)
+                lx = int(max(0, x1))
+                ly = int(y1) - 8 if int(y1) - th - 14 > 0 else int(y1) + th + 10
+                cv2.rectangle(annotated_frame, (lx, ly - th - 6), (lx + tw + 10, ly + base), colour, -1)
+                cv2.putText(annotated_frame, text, (lx + 5, ly - 2), font, scale, (255, 255, 255), thick)
 
         # COLLISIONS — skipped unless ENABLE_COLLISION_ALERTS = True
         if ENABLE_COLLISION_ALERTS:
@@ -1572,7 +1601,11 @@ while True:
     # CLIP BUFFERS: annotated frame for the saved clip, raw frame for Gemini
     update_clips(shrink_for_clip(annotated_frame), shrink_for_clip(frame))
     cv2.imshow(WINDOW_NAME, annotated_frame)
-    key = cv2.waitKey(max(1, int(1000 / EFFECTIVE_FPS))) & 0xFF
+    # GPU BOOST: wait only for the time left in this frame, not a full extra frame
+    _now = _time.perf_counter()
+    _left_ms = int((1.0 / EFFECTIVE_FPS - (_now - globals().get('_last_frame_t', _now))) * 1000)
+    key = cv2.waitKey(max(1, _left_ms)) & 0xFF
+    _last_frame_t = _time.perf_counter()
     if key == ord("q"):
         print("Q pressed")
         break

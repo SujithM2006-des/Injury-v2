@@ -2482,32 +2482,61 @@ def _band_match(db):
         ended = _band_time(status.get("finished_at")) or last_seen
         if ended and now - ended > _band_td(minutes=_band_hold()):
             return info.get("match_id"), info.get("match_name"), "over", None
-        return info.get("match_id"), info.get("match_name"), "finished", None
+        # BAND HOLD FIX: keep counting up to where the video got to, so the colour stays the same
+        video_end = None
+        try:
+            if progress.get("frame") is not None and info.get("fps"):
+                video_end = float(progress["frame"]) / float(info["fps"])
+        except (TypeError, ValueError, ZeroDivisionError):
+            video_end = None
+        return info.get("match_id"), info.get("match_name"), "finished", video_end
     # no detector status yet: use the newest match
     m = db.query(MatchSession).order_by(MatchSession.date.desc()).first()
     return (m.id, m.name, "running", None) if m else (None, None, "over", None)
 
 
+def _band_is_test(e):
+    text = ((e.note or "") + " " + (e.injury_note or "")).lower()
+    return "test only" in text or text.strip().startswith("test")
+
+
 def _band_events(db, match_id, video_now):
-    """Falls of this match + falls of earlier runs of the same video (reused by the duplicate check)."""
-    rows = db.query(InjuryEvent).filter(InjuryEvent.match_session_id == match_id).all()
+    """BAND REUSE FIX: falls of this match + real detector falls of earlier runs of the same video
+    that the video has already reached. Each fall is counted once."""
+    rows = [e for e in db.query(InjuryEvent).filter(InjuryEvent.match_session_id == match_id).all()
+            if not _band_is_test(e)]
     key_of = globals().get("_video_key")
     match = db.query(MatchSession).filter(MatchSession.id == match_id).first()
     key = key_of(match) if (key_of and match) else None
-    if key:
+    if key and video_now is not None:
         seen = {e.id for e in rows}
         earlier = (db.query(InjuryEvent)
                    .filter(InjuryEvent.match_session_id.isnot(None),
                            InjuryEvent.match_session_id != match_id,
                            InjuryEvent.video_time_sec.isnot(None))
+                   .order_by(InjuryEvent.timestamp.desc())
                    .all())
         for e in earlier:
             if e.id in seen or key_of(e.match) != key:
                 continue
-            if video_now is not None and e.video_time_sec > video_now + 1:
+            if (e.source or "ai") != "ai" or _band_is_test(e):
+                continue      # only real detector falls are reused
+            if e.video_time_sec > video_now + 1:
                 continue      # the video has not reached this fall yet
             rows.append(e)
-    return rows
+    # the same fall saved by several runs counts once (this run first, then the newest earlier run)
+    window = globals().get("DUPLICATE_WINDOW_SEC", 3)
+    kept = []
+    for e in rows:
+        dup = e.video_time_sec is not None and any(
+            k.video_time_sec is not None
+            and abs(k.video_time_sec - e.video_time_sec) <= window
+            and (k.event_type or "").upper() == (e.event_type or "").upper()
+            and (k.player_id is None or e.player_id is None or k.player_id == e.player_id)
+            for k in kept)
+        if not dup:
+            kept.append(e)
+    return kept
 
 
 def _band_level(high, medium, low):
@@ -2529,6 +2558,7 @@ def _band_summary(player_id, key, db):
     match_id, match_name, state, video_now = _band_match(db)
     counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
     per_player = {}            # player id (None = Unidentified) -> name, jersey, team, counts
+    counted = []               # the events behind the colour (shown in /summary)
     if match_id and state != "over":
         for e in _band_events(db, match_id, video_now):
             if player_id and e.player_id != player_id:
@@ -2539,6 +2569,8 @@ def _band_summary(player_id, key, db):
             if risk not in counts:
                 continue
             counts[risk] += 1
+            counted.append({"id": e.id, "match_id": e.match_session_id, "video_time_sec": e.video_time_sec,
+                            "risk": risk, "player_id": e.player_id, "source": e.source})
             row = per_player.get(e.player_id)
             if row is None:
                 p = e.player if e.player_id is not None else None
@@ -2560,7 +2592,8 @@ def _band_summary(player_id, key, db):
     level = _band_level(counts["HIGH"], counts["MEDIUM"], counts["LOW"])
     return {"level": level, "falls": sum(counts.values()), "high": counts["HIGH"], "medium": counts["MEDIUM"],
             "low": counts["LOW"], "match_id": match_id, "match_name": match_name, "match_state": state,
-            "players": players}
+            "video_now": round(video_now, 1) if video_now is not None else None,
+            "players": players, "events": counted}
 
 
 @app.get("/band/{player_id}/status", response_class=_BandText)
