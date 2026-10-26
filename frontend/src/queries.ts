@@ -1,10 +1,10 @@
 import { useQuery } from '@tanstack/react-query'
 import { getAlertReads, getAssessments, getDetectorProgress, getEvents, getInjuryHistory, getMatches, getPlayers, getTeams } from './api/services'
-import { devMode } from './api/client'
+import { devMode, tokenStore } from './api/client'
 import type { InjuryEvent } from './types'
 
-// In developer preview there is no login, so nothing is fetched.
-const on = () => !devMode.get()
+// Nothing is fetched without a login (logged out, or the developer preview).
+const on = () => !devMode.get() && !!tokenStore.get()
 
 /** Match name without the date the backend adds ("fall_test - 19 Oct 2026 17:30" -> "fall_test"). */
 const baseMatch = (m: string | null) => (m ?? '').replace(/\s+-\s+\d{1,2}\s+\w{3}\s+\d{4}.*$/, '').trim().toLowerCase()
@@ -15,8 +15,8 @@ const sameFall = (a: InjuryEvent, b: InjuryEvent) =>
   a.videoTimeSec !== null && b.videoTimeSec !== null
   && Math.abs(a.videoTimeSec - b.videoTimeSec) <= 2
   && baseMatch(a.matchName) === baseMatch(b.matchName)
-  && (a.region ?? '').toLowerCase() === (b.region ?? '').toLowerCase()
-  && a.eventType.toUpperCase() === b.eventType.toUpperCase()
+  && (a.region ?? '') === (b.region ?? '')
+  && a.eventType === b.eventType
   && !(a.player.playerId !== null && b.player.playerId !== null && a.player.playerId !== b.player.playerId)
 
 /** Every clip once: when a fall was saved again (re-run of the same video, maybe with a

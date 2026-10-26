@@ -7,6 +7,7 @@ pydantic
 python-jose[cryptography]
 passlib[bcrypt]
 bcrypt==4.0.1
+cryptography          # AES-256-GCM encryption of the stored data (crypto_store.py)
 
 # ---------- Detection ----------
 # For GPU: install the CUDA build of torch FIRST from pytorch.org,

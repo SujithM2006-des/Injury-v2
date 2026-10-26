@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, NavLink, Navigate, Outlet, useNavigate } from 'react-router-dom'
 import { LayoutDashboard, Users, Shield, Video, Activity, Zap, Bell, FileText, UserCog, Server, Settings, Menu, PanelLeft, Search, LogOut, HelpCircle, ChevronDown, UserRound, History, Info, X, type LucideIcon } from 'lucide-react'
 import { useAuth, home } from './auth'
@@ -6,7 +6,7 @@ import type { InjuryEvent, Role } from './types'
 import { useQueryClient } from '@tanstack/react-query'
 import { useAlertReads, useEvents } from './queries'
 import { markAlertsRead } from './api/services'
-import { Badge, Logo, LogoMark, RiskBadge } from './ui'
+import { Badge, Logo, LogoMark, RiskBadge, useDismiss } from './ui'
 import { fmtVideo, identText } from './pages'
 
 /* ---------- identification updates ----------
@@ -65,6 +65,12 @@ export default function Layout() {
   const [drawer, setDrawer] = useState(false)
   const [bell, setBell] = useState(false)
   const [menu, setMenu] = useState(false)
+  const bellRef = useRef<HTMLDivElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const closeBell = useCallback(() => setBell(false), [])
+  const closeMenu = useCallback(() => setMenu(false), [])
+  useDismiss(bell, closeBell, bellRef)
+  useDismiss(menu, closeMenu, menuRef)
   const [q, setQ] = useState('')
   const events = useEvents()
   // Medical staff and coaches: the bell shows their unread alerts (every risk level).
@@ -148,8 +154,8 @@ export default function Layout() {
           <button aria-label="Open menu" className="rounded-lg p-2 text-slate-600 hover:bg-slate-100 lg:hidden" onClick={() => setDrawer(true)}><Menu size={20} /></button>
           <button aria-label="Collapse sidebar" className="hidden rounded-lg p-2 text-slate-600 hover:bg-slate-100 lg:block" onClick={() => setCollapsed((c) => !c)}><PanelLeft size={20} /></button>
           {player ? <div className="flex-1" /> : <form onSubmit={search} className="relative max-w-md flex-1" role="search"><Search size={16} className="absolute left-3.5 top-3 text-slate-400" /><input aria-label="Search events, players" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search players, matches, events…" className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-10 pr-3 text-sm outline-none transition focus:border-brand-600 focus:bg-white focus:ring-2 focus:ring-brand-600/15" /></form>}
-          <div className="relative ml-auto">
-            <button aria-label={`Notifications, ${high.length} ${staff ? 'unread' : 'high-risk'}`} onClick={() => { setBell((b) => !b); setMenu(false) }} className="relative rounded-xl border border-slate-200 bg-white p-2.5 text-slate-600 hover:bg-slate-50">
+          <div ref={bellRef} className="relative ml-auto">
+            <button aria-expanded={bell} aria-label={`Notifications, ${high.length} ${staff ? 'unread' : 'high-risk'}`} onClick={() => { setBell((b) => !b); setMenu(false) }} className="relative rounded-xl border border-slate-200 bg-white p-2.5 text-slate-600 hover:bg-slate-50">
               <Bell size={18} />
               {high.length > 0 && <span className="absolute -right-0.5 -top-0.5 grid h-5 min-w-5 place-items-center rounded-full bg-red-600 px-1 text-[10px] font-bold text-white">{high.length > 99 ? '99+' : high.length}</span>}
             </button>
@@ -172,7 +178,7 @@ export default function Layout() {
               </div>
             )}
           </div>
-          <div className="relative">
+          <div ref={menuRef} className="relative">
             <button onClick={() => { setMenu((m) => !m); setBell(false) }} className="flex items-center gap-2.5 rounded-xl py-1 pl-1 pr-2 hover:bg-slate-100" aria-haspopup="menu" aria-expanded={menu}><span className="grid h-9 w-9 place-items-center rounded-full bg-gradient-to-br from-sky-400 to-brand-600 text-sm font-bold text-white">{(user.name[0] || '?').toUpperCase()}</span><span className="hidden text-left text-xs leading-tight sm:block"><b className="block text-sm text-navy-900">{user.name}</b><span className="text-slate-500">{ROLE_NAME[user.role]}</span></span><ChevronDown size={14} className="text-slate-400" /></button>
             {menu && <div role="menu" className="absolute right-0 mt-2 w-44 rounded-2xl border border-slate-200 bg-white p-1 text-sm shadow-lg"><button role="menuitem" className="block w-full rounded px-3 py-2 text-left hover:bg-slate-100" onClick={() => { setMenu(false); nav(player ? '/player/profile' : '/settings') }}>{player ? 'My profile' : 'Profile & settings'}</button><button role="menuitem" className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-red-700 hover:bg-slate-100" onClick={() => { logout(); nav('/login', { replace: true }) }}><LogOut size={14} />Log out</button></div>}
           </div>

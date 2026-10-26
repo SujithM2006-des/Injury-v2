@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useState, type React
 import { useQueryClient } from '@tanstack/react-query'
 import type { Role } from './types'
 import { login as loginSvc } from './api/services'
-import { devMode, setUnauthorizedHandler, tokenStore } from './api/client'
+import { devMode, sessionKeyStore, setUnauthorizedHandler, tokenStore } from './api/client'
 import { toRole } from './api/mappers'
 
 export interface User { name: string; role: Role; teamId: number | null; dev?: boolean }
@@ -33,6 +33,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(() => {
     qc.clear()
     tokenStore.clear()
+    sessionKeyStore.clear()
     localStorage.removeItem(USER_KEY)
     devMode.set(false)
     setUser(null)
@@ -45,6 +46,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const r = await loginSvc(u, p)
     qc.clear()
     tokenStore.set(r.access_token)
+    sessionKeyStore.set(r.session_key)
     devMode.set(false)
     const next: User = { name: r.username, role: toRole(r.role), teamId: r.team_id }
     localStorage.setItem(USER_KEY, JSON.stringify(next))
@@ -56,6 +58,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const devPreview = (role: Role) => {
     qc.clear()
     tokenStore.clear()
+    sessionKeyStore.clear()
     localStorage.removeItem(USER_KEY)
     devMode.set(true)
     setUser({ name: `Preview ${role.toLowerCase()}`, role, teamId: null, dev: true })

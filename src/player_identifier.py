@@ -14,6 +14,7 @@ from datetime import datetime
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from crypto_store import encrypt_text
 from database import SessionLocal
 from models import Player, Team
 
@@ -453,8 +454,8 @@ class PlayerIdentifier:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                track_id, result["player_id"], result["player_name"],
-                result["method"], result["detail"], result["confidence"],
+                track_id, result["player_id"], encrypt_text(result["player_name"]),
+                result["method"], encrypt_text(result["detail"]), result["confidence"],
                 result["vote_count"], datetime.now().isoformat()
             )
         )

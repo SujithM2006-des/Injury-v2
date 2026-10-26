@@ -245,7 +245,11 @@ export function PlayerDashboard() {
 
   const all = uniqueFalls(ev.data ?? [])
   const current = all.filter((e) => !e.resolved)
-  const restFrom = current.find((e) => e.aiInjury?.rest) ?? all.find((e) => e.aiInjury?.rest)
+  // rest and recovery follow the WORST open fall (highest risk, then longest rest), not just the newest one
+  const byWorst = (list: InjuryEvent[]) => list.filter((e) => e.aiInjury?.rest)
+    .sort((a, b) => (RANK[b.risk ?? 'LOW'] - RANK[a.risk ?? 'LOW']) || ((restDays(b.aiInjury?.rest) ?? 0) - (restDays(a.aiInjury?.rest) ?? 0)))[0]
+  const worstOpen = byWorst(current)
+  const restFrom = worstOpen ?? byWorst(all)
   const name = me.data?.playerName ?? user?.name ?? 'Player'
 
   const KPI: [string, number | string | null, string?][] = [
@@ -258,7 +262,8 @@ export function PlayerDashboard() {
   return (
     <>
       <PageHeader back={false} title="Player dashboard" crumbs={[{ label: 'Dashboard' }]} actions={<Link to="/player/reports" className={btnS}><FileText size={16} />My report</Link>} />
-      {ev.data && <StatusBanner open={current} rest={current.find((e) => e.aiInjury?.rest)?.aiInjury?.rest ?? null} />}
+      {/* the banner names the rest only when it belongs to the fall the banner is about */}
+      {ev.data && <StatusBanner open={current} rest={worstOpen && worstOpen.risk === worst(current) ? worstOpen.aiInjury?.rest ?? null : null} />}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         {KPI.map(([k, v, t]) => <Card key={k}><p className="text-xs text-slate-500">{k}</p>{ev.isLoading ? <Skeleton className="mt-2 h-8 w-12" /> : <p className={`mt-1 truncate font-bold ${typeof v === 'string' ? 'text-2xl' : 'text-3xl'} ${t ?? ''}`} title={typeof v === 'string' ? v : undefined}><Na v={v} /></p>}</Card>)}
       </div>
@@ -267,7 +272,7 @@ export function PlayerDashboard() {
       {ev.data && (
         <div className="mt-5 grid gap-4 lg:grid-cols-3">
           <BodyMap list={all} />
-          <RecoveryRing from={current.find((e) => e.aiInjury?.rest)} />
+          <RecoveryRing from={worstOpen} />
           <BandCard open={current} />
         </div>
       )}

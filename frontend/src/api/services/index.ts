@@ -38,6 +38,11 @@ export async function logManualEvent(v: { playerId: number; eventType: string; n
   await api.post(EP.manualEvent, { player_id: v.playerId, event_type: v.eventType, note: v.note, risk: v.risk, match_session_id: v.matchId })
 }
 
+/** Admin only: one event (e.g. a test or wrong detection), with its clip, AI results and assessment. */
+export async function deleteEvent(eventId: number): Promise<void> {
+  await api.delete(EP.event(eventId))
+}
+
 /** Admin only. Players and teams are kept. */
 export async function clearAllEvents(): Promise<number> {
   return (await api.delete<{ deleted_events: number }>(EP.clearEvents)).data.deleted_events

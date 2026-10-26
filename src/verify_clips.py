@@ -179,11 +179,12 @@ def main():
     q = db.query(InjuryEvent).filter(InjuryEvent.clip_path.isnot(None))
     if args.event:
         q = q.filter(InjuryEvent.id.in_(args.event))
-    if args.match is not None:
-        q = q.filter(InjuryEvent.match_session_id == args.match)
-    if not args.recheck and not args.event:
-        q = q.filter((InjuryEvent.gemini_verdict.is_(None)) | (InjuryEvent.gemini_verdict == "error"))
     events = q.order_by(InjuryEvent.id).all()
+    if args.match is not None:
+        events = [e for e in events if e.match_session_id == args.match]   # encrypted: filtered in Python
+    if not args.recheck and not args.event:
+        # gemini_verdict is encrypted: filtered in Python
+        events = [e for e in events if e.gemini_verdict in (None, "error")]
 
     if args.limit:
         events = events[: args.limit]

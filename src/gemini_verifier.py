@@ -485,7 +485,9 @@ def roster():
         db = SessionLocal()
         try:
             out = {}
-            for p, t in db.query(Player, Team).join(Team, Team.id == Player.team_id).order_by(Team.id, Player.jersey_number):
+            teams = {t.id: t for t in db.query(Team).all()}
+            rows = [(p, teams[p.team_id]) for p in db.query(Player).all() if p.team_id in teams]   # links are encrypted: matched in Python
+            for p, t in sorted(rows, key=lambda r: (r[1].id, r[0].jersey_number)):
                 out.setdefault(t.name, []).append((p.jersey_number, p.name, p.id))
             return out
         finally:

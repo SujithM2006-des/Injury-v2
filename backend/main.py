@@ -6,16 +6,25 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from passlib.context import CryptContext
 from pydantic import BaseModel
-from sqlalchemy import or_, text
+import base64
+import secrets
+
+from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session, object_session
 from sqlalchemy.sql import func
 
 from database import get_db, SessionLocal, Base
 from models import User, Player, InjuryEvent, Team, MatchSession
 from auth import verify_password, create_access_token, decode_access_token
+from crypto_store import encrypt_text, loads_maybe_encrypted, lookup_hash, now_utc, session_key
+from crypto_store import load_json as _crypto_load_json, save_json as _crypto_save_json
+from secure_transport import SecureTransport
 
 
 app = FastAPI()
+
+# encrypts every logged-in JSON response for the dashboard (added first, so CORS stays outermost)
+app.add_middleware(SecureTransport)
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,41 +46,49 @@ app.mount("/clips", StaticFiles(directory=CLIPS_DIR), name="clips")
 # seed_match_2006, ensure_users, create_admin, add_players)
 # Only adds what is missing. Never deletes anything and
 # never changes an existing password.
+# Older databases are upgraded to the encrypted schema by encrypt_database.py.
 # ============================================
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-MIGRATIONS = [
-    "ALTER TABLE match_sessions ADD COLUMN IF NOT EXISTS name VARCHAR",
-    "ALTER TABLE match_sessions ADD COLUMN IF NOT EXISTS video_source VARCHAR",
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS region VARCHAR",
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS risk VARCHAR",
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS movement DOUBLE PRECISION",
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS note VARCHAR",
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS source VARCHAR NOT NULL DEFAULT 'ai'",
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS resolved BOOLEAN DEFAULT FALSE",
-    'ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS "timestamp" TIMESTAMPTZ DEFAULT now()',
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS match_session_id INTEGER REFERENCES match_sessions(id)",
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS injury_note VARCHAR",
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS clip_path VARCHAR",
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS identified_at TIMESTAMPTZ",
-    "ALTER TABLE injury_events ALTER COLUMN player_id DROP NOT NULL",
-    # v3 — how and where the player was identified
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS track_id INTEGER",
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS video_time_sec DOUBLE PRECISION",
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS identified_by VARCHAR",
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS id_detail VARCHAR",
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS id_confidence DOUBLE PRECISION",
-    # v4 — Gemini second opinion
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS gemini_verdict VARCHAR",
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS gemini_confidence DOUBLE PRECISION",
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS gemini_reason VARCHAR",
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS gemini_description VARCHAR",
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS gemini_jersey INTEGER",
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS gemini_team VARCHAR",
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS gemini_jersey_confidence DOUBLE PRECISION",
-    "ALTER TABLE injury_events ADD COLUMN IF NOT EXISTS gemini_checked_at TIMESTAMPTZ",
-]
+
+# ---- encrypted columns cannot be compared in SQL: look rows up in Python ----
+
+def _team_named(db, name):
+    wanted = str(name or "").strip().lower()
+    return next((t for t in db.query(Team).order_by(Team.id).all() if (t.name or "").strip().lower() == wanted), None)
+
+
+def _user_named(db, username):
+    return db.query(User).filter(User.username_lookup == lookup_hash(username)).first()
+
+
+def _norm_code(value):
+    """Event types and body regions are stored in one style: "fall" / " left leg" -> "FALL" / "LEFT LEG"."""
+    text_value = " ".join(str(value or "").split()).upper()
+    return text_value or None
+
+
+def _players_of_team(db, team_id):
+    return [p for p in db.query(Player).all() if p.team_id == team_id]
+
+
+def _events_of_match(db, match_id):
+    return [e for e in db.query(InjuryEvent).filter(InjuryEvent.match_session_id.isnot(None)).all()
+            if e.match_session_id == match_id]
+
+
+def _check_encryption_ready(engine):
+    """Stops the backend with a clear message when the key or the encrypted schema is missing."""
+    encrypt_text("check")
+    insp = inspect(engine)
+    tables = insp.get_table_names()
+    users_ready = "users" not in tables or "username_lookup" in {c["name"] for c in insp.get_columns("users")}
+    links_ready = "injury_events" not in tables or any(
+        c["name"] == "player_id" and str(c["type"]).upper() == "TEXT" for c in insp.get_columns("injury_events"))
+    if not (users_ready and links_ready):
+        raise RuntimeError("The database is not (fully) encrypted yet. Stop the backend and run once (backend folder):  "
+                           "python encrypt_database.py")
 
 # ============================================
 # GEMINI RULES
@@ -146,15 +163,9 @@ def bootstrap_data():
     engine = probe.get_bind()
     probe.close()
 
-    # 1. tables + columns
+    # 1. key + encrypted schema, then any missing tables
+    _check_encryption_ready(engine)
     Base.metadata.create_all(bind=engine)
-
-    for sql in MIGRATIONS:
-        try:
-            with engine.begin() as conn:
-                conn.execute(text(sql))
-        except Exception as e:
-            print("[BOOTSTRAP] migration skipped:", sql[:60], "|", e)
 
     db = SessionLocal()
 
@@ -164,10 +175,10 @@ def bootstrap_data():
 
         for team_name, roster in ROSTERS.items():
 
-            team = db.query(Team).filter(Team.name == team_name).first()
+            team = _team_named(db, team_name)
 
             if team is None:
-                placeholder = db.query(Team).filter(Team.name == PLACEHOLDER_TEAMS[team_name]).first()
+                placeholder = _team_named(db, PLACEHOLDER_TEAMS[team_name])
                 if placeholder is not None:
                     placeholder.name = team_name
                     team = placeholder
@@ -180,7 +191,7 @@ def bootstrap_data():
             teams[team_name] = team
 
             existing = {}
-            for p in db.query(Player).filter(Player.team_id == team.id).all():
+            for p in _players_of_team(db, team.id):
                 existing.setdefault(p.jersey_number, p)
 
             for number, name in roster:
@@ -193,7 +204,7 @@ def bootstrap_data():
         # 3. coach accounts
         for username, team_name, password in COACH_ACCOUNTS:
 
-            user = db.query(User).filter(User.username == username).first()
+            user = _user_named(db, username)
 
             if user is None:
                 db.add(User(
@@ -210,7 +221,7 @@ def bootstrap_data():
                 print("[BOOTSTRAP] assigned", username, "->", team_name)
 
         # 4. admin (only if none exists)
-        if db.query(User).filter(User.role == "admin").first() is None:
+        if not any(u.role == "admin" for u in db.query(User).all()):
             db.add(User(
                 username="admin1",
                 password_hash=pwd_context.hash("admin1pass"),
@@ -295,10 +306,10 @@ def _clip_used_by_other_event(db, clip_path, exclude_ids):
     """One clip file can belong to several events (players who fell in the same frame)."""
     if not clip_path:
         return False
-    q = db.query(InjuryEvent.id).filter(InjuryEvent.clip_path == clip_path)
+    q = db.query(InjuryEvent).filter(InjuryEvent.clip_path.isnot(None))
     if exclude_ids:
         q = q.filter(InjuryEvent.id.notin_(list(exclude_ids)))
-    return q.first() is not None
+    return any(e.clip_path == clip_path for e in q.all())
 
 
 def remove_duplicate_events(db, dry_run=False):
@@ -453,16 +464,18 @@ class MatchCreateRequest(BaseModel):
 # AUTH DEPENDENCY
 # ============================================
 
-def get_current_user(authorization: str = Header(...), db: Session = Depends(get_db)):
+def get_current_user(authorization: Optional[str] = Header(None), db: Session = Depends(get_db)):
 
-    if not authorization.startswith("Bearer "):
+    # no / wrong header -> 401 (not 422), so the dashboard sends the user to the login page
+    if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid authorization header")
 
     token = authorization.replace("Bearer ", "")
 
     payload = decode_access_token(token)
 
-    if payload is None:
+    # tokens from before encryption have no session id -> log in again
+    if payload is None or not payload.get("sid"):
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     user = db.query(User).filter(User.id == payload.get("user_id")).first()
@@ -494,8 +507,8 @@ def _ai_injury_all():
     if _ai_injury_cache["mtime"] != mtime:
         try:
             with open(AI_INJURY_FILE, "r", encoding="utf-8") as f:
-                _ai_injury_cache["data"] = _json.load(f)
-        except (OSError, ValueError):
+                _ai_injury_cache["data"] = loads_maybe_encrypted(f.read())
+        except Exception:          # missing, damaged or encrypted with another key: no AI results
             _ai_injury_cache["data"] = {}
         _ai_injury_cache["mtime"] = mtime
     return _ai_injury_cache["data"]
@@ -520,8 +533,8 @@ def _ai_treatment_all():
     if _ai_treatment_cache["mtime"] != mtime:
         try:
             with open(AI_TREATMENT_FILE, "r", encoding="utf-8") as f:
-                _ai_treatment_cache["data"] = _json.load(f)
-        except (OSError, ValueError):
+                _ai_treatment_cache["data"] = loads_maybe_encrypted(f.read())
+        except Exception:          # missing, damaged or encrypted with another key: no AI results
             _ai_treatment_cache["data"] = {}
         _ai_treatment_cache["mtime"] = mtime
     return _ai_treatment_cache["data"]
@@ -583,19 +596,24 @@ def event_to_dict(e: InjuryEvent):
 @app.post("/auth/login")
 def login(request: LoginRequest, db: Session = Depends(get_db)):
 
-    user = db.query(User).filter(User.username == request.username).first()
+    user = _user_named(db, request.username)
 
     if user is None or not verify_password(request.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
+    # sid -> this login's response key (secure_transport.py); the browser decrypts with session_key
+    sid = secrets.token_urlsafe(18)
+
     token = create_access_token({
         "user_id": user.id,
         "role": user.role,
-        "team_id": user.team_id
+        "team_id": user.team_id,
+        "sid": sid,
     })
 
     return {
         "access_token": token,
+        "session_key": base64.b64encode(session_key(sid)).decode("ascii"),
         "role": user.role,
         "team_id": user.team_id,
         "username": user.username,
@@ -622,7 +640,7 @@ def create_match(request: MatchCreateRequest, db: Session = Depends(get_db)):
 @app.get("/matches")
 def get_matches(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
 
-    matches = db.query(MatchSession).order_by(MatchSession.date.desc()).all()
+    matches = db.query(MatchSession).order_by(MatchSession.id.desc()).all()     # newest first (ids grow with time)
 
     return [
         {
@@ -655,8 +673,8 @@ def create_event(request: EventCreateRequest, db: Session = Depends(get_db)):
     event = InjuryEvent(
         player_id=request.player_id,
         match_session_id=request.match_session_id,
-        event_type=request.event_type,
-        region=request.region,
+        event_type=_norm_code(request.event_type),
+        region=_norm_code(request.region),
         risk=request.risk,
         movement=request.movement,
         injury_note=request.injury_note,
@@ -667,7 +685,7 @@ def create_event(request: EventCreateRequest, db: Session = Depends(get_db)):
     )
 
     if request.player_id is not None:
-        event.identified_at = func.now()
+        event.identified_at = now_utc()
         event.identified_by = request.identified_by
         event.id_detail = request.id_detail
         event.id_confidence = request.id_confidence
@@ -680,7 +698,7 @@ def create_event(request: EventCreateRequest, db: Session = Depends(get_db)):
         # fill in the player if the earlier copy never got one (never overrides staff)
         if existing.player_id is None and event.player_id is not None:
             existing.player_id = event.player_id
-            existing.identified_at = func.now()
+            existing.identified_at = now_utc()
             existing.identified_by = event.identified_by
             existing.id_detail = event.id_detail
             existing.id_confidence = event.id_confidence
@@ -713,17 +731,17 @@ def _find_duplicate(db, new_event):
     if key is None:
         return None
 
-    candidates = (
-        db.query(InjuryEvent)
-        .join(MatchSession, InjuryEvent.match_session_id == MatchSession.id)
-        .filter(
-            InjuryEvent.match_session_id != new_event.match_session_id,
-            InjuryEvent.video_time_sec.isnot(None),
-            InjuryEvent.video_time_sec >= new_event.video_time_sec - DUPLICATE_WINDOW_SEC,
-            InjuryEvent.video_time_sec <= new_event.video_time_sec + DUPLICATE_WINDOW_SEC,
+    # match and video time are encrypted: checked in Python
+    candidates = [
+        c for c in (
+            db.query(InjuryEvent)
+            .filter(InjuryEvent.match_session_id.isnot(None), InjuryEvent.video_time_sec.isnot(None))
+            .all()
         )
-        .all()
-    )
+        if c.match_session_id != new_event.match_session_id
+        and abs(c.video_time_sec - new_event.video_time_sec) <= DUPLICATE_WINDOW_SEC
+        and c.match is not None
+    ]
 
     matches = [c for c in candidates if _same_fall(new_event, c, key_a=key)]
 
@@ -767,7 +785,7 @@ def ai_update_event(event_id: int, request: EventAIUpdateRequest, db: Session = 
 
         if not keep_existing:
             event.player_id = request.player_id
-            event.identified_at = func.now()
+            event.identified_at = now_utc()
             event.identified_by = request.identified_by
             event.id_detail = request.id_detail
             event.id_confidence = request.id_confidence
@@ -839,7 +857,7 @@ def gemini_result(
     event.gemini_team = request.team
     event.gemini_jersey = request.jersey_number
     event.gemini_jersey_confidence = request.jersey_confidence
-    event.gemini_checked_at = func.now()
+    event.gemini_checked_at = now_utc()
 
     action = "stored"
 
@@ -854,12 +872,11 @@ def gemini_result(
         and event.identified_by != "manual"
     ):
 
-        player = (
-            db.query(Player)
-            .join(Team, Team.id == Player.team_id)
-            .filter(Team.name.ilike(request.team.strip()), Player.jersey_number == request.jersey_number)
-            .first()
-        )
+        team = _team_named(db, request.team)
+        player = next(
+            (p for p in _players_of_team(db, team.id) if p.jersey_number == request.jersey_number),
+            None,
+        ) if team is not None else None
 
         if player is not None and player.id != event.player_id:
 
@@ -873,7 +890,7 @@ def gemini_result(
                 )
 
                 event.player_id = player.id
-                event.identified_at = func.now()
+                event.identified_at = now_utc()
                 event.identified_by = "gemini"
                 event.id_detail = (
                     "Gemini read #" + str(request.jersey_number) + " (" + player.team.name + ")"
@@ -1101,7 +1118,7 @@ def assign_player(
     previous = event.player.name if event.player is not None else "Unidentified"
 
     event.player_id = player.id
-    event.identified_at = func.now()
+    event.identified_at = now_utc()
     event.identified_by = "manual"
     event.id_detail = (
         "chosen from clip by " + current_user.username + " (" + current_user.role + ")"
@@ -1137,7 +1154,7 @@ def create_manual_event(
     event = InjuryEvent(
         player_id=request.player_id,
         match_session_id=request.match_session_id,
-        event_type=request.event_type,
+        event_type=_norm_code(request.event_type),
         note=request.note,
         risk=request.risk,
         source="manual",
@@ -1145,7 +1162,7 @@ def create_manual_event(
         id_detail="logged by " + current_user.username,
     )
 
-    event.identified_at = func.now()
+    event.identified_at = now_utc()
 
     db.add(event)
     db.commit()
@@ -1165,31 +1182,15 @@ def get_events(
     db: Session = Depends(get_db)
 ):
 
-    query = db.query(InjuryEvent).outerjoin(Player, InjuryEvent.player_id == Player.id)
-
-    if current_user.role in ("medical", "admin"):
-        pass
-
-    elif current_user.role in ("coach", "owner"):
-        # coach / team owner: own team's events + every Unidentified fall (to name the player)
-        query = query.filter(
-            or_(
-                Player.team_id == current_user.team_id,
-                InjuryEvent.player_id.is_(None)
-            )
-        )
-
-    elif current_user.role == "player":
-        # a player only sees their own falls
-        query = query.filter(InjuryEvent.player_id == (_player_id_of(current_user) or -1))
-
-    else:
+    if current_user.role not in ("medical", "admin", "coach", "owner", "player"):
         raise HTTPException(status_code=403, detail="Unknown role")
 
-    if match_id is not None:
-        query = query.filter(InjuryEvent.match_session_id == match_id)
-
-    events = query.order_by(InjuryEvent.timestamp.desc()).all()
+    # player / team / match links are encrypted: visibility and the match filter run in Python
+    # (coach / owner: own team's events + every Unidentified fall; player: only their own falls)
+    events = [
+        e for e in db.query(InjuryEvent).order_by(InjuryEvent.id.desc()).all()     # newest first (ids grow with time)
+        if _can_see_event(current_user, e) and (match_id is None or e.match_session_id == match_id)
+    ]
 
     return [event_to_dict(e) for e in events]
     # ============================================
@@ -1208,11 +1209,13 @@ def get_players(current_user: User = Depends(get_current_user), db: Session = De
     if current_user.role == "player":
         query = query.filter(Player.id == (_player_id_of(current_user) or -1))
 
-    # a team owner only gets their own team's players (no details of the other team)
-    elif current_user.role == "owner":
-        query = query.filter(Player.team_id == (current_user.team_id or -1))
+    players = query.all()
 
-    players = query.order_by(Player.team_id, Player.jersey_number).all()
+    # a team owner only gets their own team's players (no details of the other team)
+    if current_user.role == "owner":
+        players = [p for p in players if p.team_id == current_user.team_id]
+
+    players.sort(key=lambda p: (p.team_id, p.jersey_number))
 
     return [
         {
@@ -1244,16 +1247,20 @@ def get_teams(current_user: User = Depends(get_current_user), db: Session = Depe
 
     result = []
 
+    # risk is encrypted: count per player in Python (one pass over the identified events)
+    total_by_player, high_by_player = {}, {}
+    for e in db.query(InjuryEvent).filter(InjuryEvent.player_id.isnot(None)).all():
+        total_by_player[e.player_id] = total_by_player.get(e.player_id, 0) + 1
+        if e.risk == "HIGH":
+            high_by_player[e.player_id] = high_by_player.get(e.player_id, 0) + 1
+
+    all_users = db.query(User).all()
+
     for t in teams:
 
-        players = (
-            db.query(Player)
-            .filter(Player.team_id == t.id)
-            .order_by(Player.jersey_number)
-            .all()
-        )
+        players = sorted(_players_of_team(db, t.id), key=lambda p: p.jersey_number)
 
-        coaches = db.query(User).filter(User.role == "coach", User.team_id == t.id).all()
+        coaches = [u for u in all_users if u.role == "coach" and u.team_id == t.id]
 
         rows = []
         team_total = 0
@@ -1261,17 +1268,8 @@ def get_teams(current_user: User = Depends(get_current_user), db: Session = Depe
 
         for p in players:
 
-            total = (
-                db.query(func.count(InjuryEvent.id))
-                .filter(InjuryEvent.player_id == p.id)
-                .scalar()
-            ) or 0
-
-            high = (
-                db.query(func.count(InjuryEvent.id))
-                .filter(InjuryEvent.player_id == p.id, InjuryEvent.risk == "HIGH")
-                .scalar()
-            ) or 0
+            total = total_by_player.get(p.id, 0)
+            high = high_by_player.get(p.id, 0)
 
             team_total += total
             team_high += high
@@ -1295,7 +1293,46 @@ def get_teams(current_user: User = Depends(get_current_user), db: Session = Depe
         })
 
     return result
-    # ============================================
+
+
+# ============================================
+# ADMIN — DELETE ONE EVENT (e.g. a test or wrong detection)
+# Removes the event, its clip (unless another event uses it) and its
+# AI results / medical assessment from the JSON stores.
+# ============================================
+
+@app.delete("/events/{event_id}")
+def delete_event(event_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only admin can delete an event")
+
+    event = db.query(InjuryEvent).filter(InjuryEvent.id == event_id).first()
+
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    clip_path = event.clip_path
+    shared = _clip_used_by_other_event(db, clip_path, [event.id])
+
+    db.delete(event)
+    db.commit()
+
+    if clip_path and not shared:
+        _remove_clip_file(clip_path)
+
+    for path in (AI_INJURY_FILE, AI_TREATMENT_FILE, ASSESSMENTS_FILE):
+        data = _load_json(path, None)
+        if isinstance(data, dict) and str(event_id) in data:
+            data.pop(str(event_id))
+            _save_json(path, data)
+
+    print("[EVENTS]", current_user.username, "deleted event", event_id)
+
+    return {"message": "Event #" + str(event_id) + " deleted", "event_id": event_id}
+
+
+# ============================================
 # MARK EVENT RESOLVED
 # ============================================
 
@@ -1426,7 +1463,7 @@ def user_to_dict(u: User):
             out["player_id"] = player.id
             out["player_name"] = player.name
             out["jersey_number"] = player.jersey_number
-            out["coaches"] = [c.username for c in session.query(User).filter(User.role == "coach", User.team_id == player.team_id).all()]
+            out["coaches"] = [c.username for c in session.query(User).all() if c.role == "coach" and c.team_id == player.team_id]
 
     return out
 
@@ -1448,13 +1485,13 @@ def list_users(current_user: User = Depends(get_current_user), db: Session = Dep
 
     _require_admin_or_owner(current_user)
 
-    query = db.query(User)
+    users = db.query(User).all()
 
     # team owner: their own team's logins + medical staff (view only); never the other team
     if current_user.role == "owner":
-        query = query.filter(or_(User.team_id == current_user.team_id, User.role == "medical"))
+        users = [u for u in users if u.team_id == current_user.team_id or u.role == "medical"]
 
-    users = query.order_by(User.role, User.username).all()
+    users.sort(key=lambda u: (u.role, u.username.lower()))
 
     return [user_to_dict(u) for u in users]
 
@@ -1495,7 +1532,7 @@ def create_user(
     if is_owner and role not in OWNER_CAN_CREATE:
         raise HTTPException(status_code=403, detail="A team owner can only create coach and player logins")
 
-    taken = db.query(User).filter(func.lower(User.username) == username.lower()).first()
+    taken = _user_named(db, username)       # case-insensitive (lookup hash of the lower-case name)
 
     if taken is not None:
         raise HTTPException(status_code=409, detail="Username '" + username + "' is already taken")
@@ -1580,7 +1617,7 @@ def delete_user(user_id: int, current_user: User = Depends(get_current_user), db
         if user.team_id != current_user.team_id:
             raise HTTPException(status_code=403, detail="A team owner can only remove their own team's logins")
 
-    if user.role == "admin" and db.query(User).filter(User.role == "admin").count() <= 1:
+    if user.role == "admin" and sum(1 for u in db.query(User).all() if u.role == "admin") <= 1:
         raise HTTPException(status_code=400, detail="At least one admin account must remain")
 
     username = user.username
@@ -1628,11 +1665,7 @@ def _now_utc():
 
 
 def _read_detector_status():
-    try:
-        with open(DETECTOR_STATUS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return None
+    return _load_json(DETECTOR_STATUS_FILE, None)
 
 
 @app.post("/system/detector-status")
@@ -1658,14 +1691,7 @@ def report_detector_status(request: DetectorStatusRequest):
     if state == "finished":
         current["finished_at"] = current["last_seen"]
 
-    tmp = DETECTOR_STATUS_FILE + ".tmp"
-    try:
-        os.makedirs(os.path.dirname(DETECTOR_STATUS_FILE), exist_ok=True)
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(current, f, default=str)
-        os.replace(tmp, DETECTOR_STATUS_FILE)
-    except OSError as e:
-        raise HTTPException(status_code=500, detail="Could not save detector status: " + str(e))
+    _save_json(DETECTOR_STATUS_FILE, current)
 
     return {"message": "Status saved", "state": state}
 
@@ -1727,12 +1753,10 @@ def system_status(current_user: User = Depends(get_current_user), db: Session = 
     try:
         total = db.query(func.count(InjuryEvent.id)).scalar() or 0
         identified = db.query(func.count(InjuryEvent.id)).filter(InjuryEvent.player_id.isnot(None)).scalar() or 0
-        by_method = (
-            db.query(InjuryEvent.identified_by, func.count(InjuryEvent.id))
-            .filter(InjuryEvent.player_id.isnot(None))
-            .group_by(InjuryEvent.identified_by)
-            .all()
-        )
+        by_method = {}
+        for e in db.query(InjuryEvent).filter(InjuryEvent.player_id.isnot(None)).all():
+            by_method[e.identified_by] = by_method.get(e.identified_by, 0) + 1
+        by_method = list(by_method.items())
         gemini_checked = db.query(func.count(InjuryEvent.id)).filter(InjuryEvent.gemini_verdict.isnot(None)).scalar() or 0
         identity = {
             "events": total,
@@ -1747,14 +1771,11 @@ def system_status(current_user: User = Depends(get_current_user), db: Session = 
     # ---- last job ----
     last_job = None
     try:
-        m = db.query(MatchSession).order_by(MatchSession.date.desc()).first()
+        m = db.query(MatchSession).order_by(MatchSession.id.desc()).first()
         if m is not None:
-            ev_count = db.query(func.count(InjuryEvent.id)).filter(InjuryEvent.match_session_id == m.id).scalar() or 0
-            ev_ident = (
-                db.query(func.count(InjuryEvent.id))
-                .filter(InjuryEvent.match_session_id == m.id, InjuryEvent.player_id.isnot(None))
-                .scalar()
-            ) or 0
+            match_events = _events_of_match(db, m.id)
+            ev_count = len(match_events)
+            ev_ident = sum(1 for e in match_events if e.player_id is not None)
             last_job = {
                 "id": m.id,
                 "name": m.name or ("Match #" + str(m.id)),
@@ -1824,20 +1845,13 @@ MAX_READS_PER_USER = 5000
 
 
 def _load_json(path, default):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return default
+    """Every JSON store in output/ is encrypted (crypto_store.py); older plain files still load."""
+    return _crypto_load_json(path, default)
 
 
 def _save_json(path, data):
-    tmp = path + ".tmp"
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, default=str, ensure_ascii=False, indent=1)
-        os.replace(tmp, path)
+        _crypto_save_json(path, data)
     except OSError as e:
         raise HTTPException(status_code=500, detail="Could not save: " + str(e))
 
@@ -2046,16 +2060,18 @@ def _identifying_events(db, match_id, frame, fps):
     if not match_id or not frame or not fps:
         return []
     video_now = float(frame) / float(fps)
-    rows = (
-        db.query(InjuryEvent.id, InjuryEvent.video_time_sec)
-        .filter(
-            InjuryEvent.match_session_id == match_id,
-            InjuryEvent.player_id.is_(None),
-            InjuryEvent.video_time_sec.isnot(None),
-            InjuryEvent.video_time_sec >= video_now - IDENTIFY_WINDOW_SEC,
+    rows = [
+        (e.id, e.video_time_sec) for e in (
+            db.query(InjuryEvent)
+            .filter(
+                InjuryEvent.match_session_id.isnot(None),
+                InjuryEvent.player_id.is_(None),
+                InjuryEvent.video_time_sec.isnot(None),
+            )
+            .all()
         )
-        .all()
-    )
+        if e.match_session_id == match_id and e.video_time_sec >= video_now - IDENTIFY_WINDOW_SEC
+    ]
     out = []
     for event_id, t in rows:
         pct = int(round(100 * max(0.0, video_now - float(t)) / IDENTIFY_WINDOW_SEC))
@@ -2491,7 +2507,7 @@ def _band_match(db):
             video_end = None
         return info.get("match_id"), info.get("match_name"), "finished", video_end
     # no detector status yet: use the newest match
-    m = db.query(MatchSession).order_by(MatchSession.date.desc()).first()
+    m = db.query(MatchSession).order_by(MatchSession.id.desc()).first()
     return (m.id, m.name, "running", None) if m else (None, None, "over", None)
 
 
@@ -2503,8 +2519,7 @@ def _band_is_test(e):
 def _band_events(db, match_id, video_now):
     """BAND REUSE FIX: falls of this match + real detector falls of earlier runs of the same video
     that the video has already reached. Each fall is counted once."""
-    rows = [e for e in db.query(InjuryEvent).filter(InjuryEvent.match_session_id == match_id).all()
-            if not _band_is_test(e)]
+    rows = [e for e in _events_of_match(db, match_id) if not _band_is_test(e)]
     key_of = globals().get("_video_key")
     match = db.query(MatchSession).filter(MatchSession.id == match_id).first()
     key = key_of(match) if (key_of and match) else None
@@ -2512,9 +2527,8 @@ def _band_events(db, match_id, video_now):
         seen = {e.id for e in rows}
         earlier = (db.query(InjuryEvent)
                    .filter(InjuryEvent.match_session_id.isnot(None),
-                           InjuryEvent.match_session_id != match_id,
                            InjuryEvent.video_time_sec.isnot(None))
-                   .order_by(InjuryEvent.timestamp.desc())
+                   .order_by(InjuryEvent.id.desc())
                    .all())
         for e in earlier:
             if e.id in seen or key_of(e.match) != key:
@@ -2803,8 +2817,10 @@ def cleanup_clips(request: ClipCleanupRequest, current_user: User = Depends(get_
                 deleted.append(name)
                 freed += size
     if deleted:
-        for e in db.query(InjuryEvent).filter(InjuryEvent.clip_path.in_(deleted)).all():
-            e.clip_path = None
+        gone = set(deleted)
+        for e in db.query(InjuryEvent).filter(InjuryEvent.clip_path.isnot(None)).all():
+            if e.clip_path in gone:
+                e.clip_path = None
         db.commit()
     print("[SETTINGS]", current_user.username, "deleted", len(deleted), "clips older than", days, "days")
     return {"deleted": len(deleted), "freed_mb": round(freed / 1048576, 1), "clips": _clips_info()}

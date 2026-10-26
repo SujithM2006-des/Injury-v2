@@ -81,14 +81,11 @@ os.makedirs(CLIPS_DIR, exist_ok=True)
 
 # ---- settings from the admin Settings page (output/detection_settings.json) ----
 # Missing file or missing value = the default written next to each setting below.
-import json as _ds_json
-try:
-    with open(os.path.join(OUTPUT_DIR, "detection_settings.json"), "r", encoding="utf-8") as _f:
-        _DS = _ds_json.load(_f)
-    if not isinstance(_DS, dict):
-        _DS = {}
+import crypto_store   # the settings file is encrypted like every other store in output/
+_DS = crypto_store.load_json(os.path.join(OUTPUT_DIR, "detection_settings.json"), None)
+if isinstance(_DS, dict):
     print("[SETTINGS] Detection settings loaded from the admin Settings page")
-except (OSError, ValueError):
+else:
     _DS = {}
 
 

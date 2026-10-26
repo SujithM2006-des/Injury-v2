@@ -6,7 +6,7 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { Shield, Eye, EyeOff, Plus, Play, Pause, Square, RotateCcw, Maximize, Upload, VideoOff, CheckCheck, Download, RefreshCw, WifiOff, Lock, FileQuestion, ServerCrash, Cpu, ChevronRight, ChevronDown, ClipboardPlus, Trash2, Sparkles, UserCheck, History, ExternalLink, ImageOff, CheckCircle2, Pencil, Loader2, Activity, Bell, Zap, FileText, CalendarDays, Users, HeartPulse, type LucideIcon } from 'lucide-react'
 import { useAuth, home } from './auth'
-import { addInjuryHistory, assignPlayer, clearAllEvents, createUser, deleteInjuryHistory, deletePlayerPhoto, deleteUser, getAssessment, getMe, getPlayerPhotoBlob, getPlayerPhotos, getSystemStatus, getUsers, logManualEvent, markAlertsRead, reopenEvent, resolveEvent, saveAssessment, updateInjuryHistory, uploadPlayerPhoto, type AssessmentInput, type InjuryHistoryInput } from './api/services'
+import { addInjuryHistory, assignPlayer, clearAllEvents, createUser, deleteEvent, deleteInjuryHistory, deletePlayerPhoto, deleteUser, getAssessment, getMe, getPlayerPhotoBlob, getPlayerPhotos, getSystemStatus, getUsers, logManualEvent, markAlertsRead, reopenEvent, resolveEvent, saveAssessment, updateInjuryHistory, uploadPlayerPhoto, type AssessmentInput, type InjuryHistoryInput } from './api/services'
 import { normalizeApiError } from './api/client'
 import { AdminSettingsPage } from './adminSettings'
 import type { AppUser } from './api/mappers'
@@ -16,8 +16,8 @@ import { dateOptions } from './prefs'
 import type { InjuryEvent, Player, RiskLevel, Role } from './types'
 import { BodyMap, FootballerBack, RoleArt, StadiumBackdrop } from './art'
 import { safetyMeasures, SAFETY_DISCLAIMER } from './safety'
-import { Badge, BarList, Card, Confirm, Disclaimer, DISCLAIMER_2, Donut, EmptyState, ErrorState, Field, IdentityBadge, KpiCard, Logo, LogoMark, Modal, Na, PageHeader, RiskBadge, SafetyMeasures, SERIES, Skeleton, STATUS_COLOR, TrendLine, btn, btnD, btnP, btnS, inp, inpAuto, useToast, type TileTone, type Tone } from './ui'
-import { ArrowRight, BellRing, BrainCircuit, ClipboardCheck, Crown, Mail, ScanFace, ShieldAlert, ShieldCheck, Stethoscope, Target, UserCog, Video } from 'lucide-react'
+import { Badge, BarList, Card, Confirm, Disclaimer, DISCLAIMER_2, Donut, EmptyState, ErrorState, Field, IdentityBadge, KpiCard, Logo, LogoMark, Modal, Na, PageHeader, RiskBadge, SafetyMeasures, SERIES, Skeleton, STATUS_COLOR, TrendLine, btn, btnD, btnP, btnS, inp, inpAuto, usePageTitle, useToast, type TileTone, type Tone } from './ui'
+import { ArrowRight, BellRing, BrainCircuit, ClipboardCheck, Crown, Mail, ScanFace, ShieldAlert, ShieldCheck, Stethoscope, UserCog, Video } from 'lucide-react'
 
 /** Small outlined button used instead of text links */
 export const btnSm = `${btnS} !gap-1.5 !px-2.5 !py-1 !text-xs`
@@ -593,6 +593,7 @@ export function Login() {
   const [forgot, setForgot] = useState(false)
   const [sent, setSent] = useState(false)
   const f = useForm<z.infer<typeof ls>>({ resolver: zodResolver(ls) })
+  usePageTitle('Login')
   if (user) return <Navigate to={home[user.role]} replace />
   const go = f.handleSubmit(async (v) => {
     setErr('')
@@ -851,7 +852,7 @@ const KPI_ICON: Record<string, [LucideIcon, TileTone]> = {
   'Total teams': [Shield, 'blue'], 'My team': [Shield, 'blue'], 'Total players': [Users, 'violet'], 'Players in my team': [Users, 'violet'],
   'Total incidents': [Activity, 'sky'], 'Recent incidents': [Activity, 'sky'], 'High-risk incidents': [ShieldAlert, 'red'], 'High-risk alerts': [ShieldAlert, 'red'],
   'Pending medical reviews': [ClipboardCheck, 'amber'], 'Players needing attention': [HeartPulse, 'amber'], 'Pending reviews': [ClipboardCheck, 'blue'],
-  'Matches analysed': [Video, 'green'], 'Injury events': [Activity, 'red'], 'Players monitored': [Users, 'blue'], 'High-risk cases': [ShieldAlert, 'red'], 'Avg AI confidence': [Target, 'sky'],
+  'Matches analysed': [Video, 'green'], 'Injury events': [Activity, 'red'], 'Players monitored': [Users, 'blue'], 'High-risk cases': [ShieldAlert, 'red'], 'Unidentified falls': [UserCheck, 'amber'],
   'High priority': [ShieldAlert, 'red'], 'Medium priority': [Bell, 'amber'], 'Low priority': [CheckCircle2, 'green'], 'Assessments saved': [Stethoscope, 'violet'],
 }
 
@@ -1031,13 +1032,10 @@ export function Dashboard({ role }: { role: Role }) {
   const unidentified = list.filter((e) => !e.identified)
   const myTeam = role === 'COACH' || role === 'OWNER' ? (teams.data ?? [])[0] : undefined
   const matchesAnalysed = new Set(list.map((e) => e.matchId).filter((m) => m !== null)).size
-  // average of the real AI (Gemini) confidence; "—" until at least one fall was checked
-  const confs = list.map((e) => e.gemini.confidence).filter((c): c is number => c !== null)
-  const avgConf = confs.length ? `${Math.round((confs.reduce((a, b) => a + b, 0) / confs.length) * 100)}%` : '—'
 
   // Same KPI cards as the design; "—" where the backend has no data for it.
   const KPI: Record<Role, [string, number | string | null, string?][]> = {
-    ADMIN: [['Matches analysed', ev.data ? matchesAnalysed : null], ['Injury events', ev.data ? list.length : null], ['Players monitored', players.data?.length ?? null], ['High-risk cases', ev.data ? list.filter((e) => e.risk === 'HIGH').length : null, 'text-red-700'], ['Pending reviews', ev.data ? open.length : null, 'text-amber-600'], ['Avg AI confidence', ev.data ? avgConf : null]],
+    ADMIN: [['Matches analysed', ev.data ? matchesAnalysed : null], ['Injury events', ev.data ? list.length : null], ['Players monitored', players.data?.length ?? null], ['High-risk cases', ev.data ? list.filter((e) => e.risk === 'HIGH').length : null, 'text-red-700'], ['Pending reviews', ev.data ? open.length : null, 'text-amber-600'], ['Unidentified falls', ev.data ? unidentified.length : null, 'text-orange-600']],
     COACH: [['Players in my team', myTeam?.playerCount ?? null], ['Recent incidents', myTeam?.injuryEvents ?? null], ['High-risk alerts', myTeam?.highRiskEvents ?? null, 'text-red-700'], ['Players needing attention', myTeam ? myTeam.players.filter((p) => p.highRiskEvents > 0).length : null, 'text-amber-600']],
     MEDICAL: [['Pending reviews', ev.data ? open.length : null], ['High priority', ev.data ? open.filter((e) => e.risk === 'HIGH').length : null, 'text-red-700'], ['Medium priority', ev.data ? open.filter((e) => e.risk === 'MEDIUM').length : null, 'text-amber-600'], ['Low priority', ev.data ? open.filter((e) => e.risk === 'LOW').length : null, 'text-green-700'], ['Assessments saved', assessments.data ? assessments.data.length : null]],
     PLAYER: [],
@@ -1877,9 +1875,10 @@ export function Detail({ k }: { k: 'teams' | 'players' | 'reports' }) {
   const team = k === 'teams' ? (teams.data ?? []).find((t) => String(t.id) === id) : undefined
   const player = k === 'players' ? (players.data ?? []).find((p) => String(p.id) === id) : undefined
   const mine = (ev.data ?? []).filter((e) => String(e.player.playerId) === id)
-  const name = team?.name ?? (player ? `${player.name} #${player.jersey}` : `${label.replace(/s$/, '')} #${id}`)
   const loading = (k === 'teams' && teams.isLoading) || (k === 'players' && players.isLoading)
   const found = k === 'teams' ? !!team : k === 'players' ? !!player : false
+  // another team's page (coach / owner) or a wrong id: a plain heading, no tabs
+  const name = team?.name ?? (player ? `${player.name} #${player.jersey}` : loading ? 'Loading…' : k === 'reports' ? `Report #${id}` : 'Not available')
 
   const Stat = ({ l, v, t = '' }: { l: string; v: ReactNode; t?: string }) => <div className="rounded-xl border border-slate-200 p-4"><p className="text-xs text-slate-500">{l}</p><p className={`mt-1 text-2xl font-bold ${t}`}>{v}</p></div>
 
@@ -1889,9 +1888,11 @@ export function Detail({ k }: { k: 'teams' | 'players' | 'reports' }) {
         {k === 'players' && user?.role === 'ADMIN' && <button className={btnS} onClick={() => setDeact(true)}>Deactivate</button>}
         {k === 'reports' && <><button className={btnS} onClick={() => toast('Report unavailable: report generation is not in the backend yet.', true)}><Download size={16} />Download</button><button className={btnS} onClick={() => toast(NC, true)}><RefreshCw size={16} />Regenerate</button></>}
       </>} />
-      <div role="tablist" className="mb-4 flex gap-1 overflow-x-auto border-b">{tabs.map((t) => <button key={t} role="tab" aria-selected={tab === t} onClick={() => setTab(t)} className={`px-4 py-2 text-sm ${tab === t ? 'border-b-2 border-[#0b1f3a] font-semibold' : 'text-slate-500'}`}>{t}</button>)}</div>
+      <div role="tablist" className={`mb-4 flex gap-1 overflow-x-auto border-b ${!found && !loading && k !== 'reports' ? 'hidden' : ''}`}>{tabs.map((t) => <button key={t} role="tab" aria-selected={tab === t} onClick={() => setTab(t)} className={`px-4 py-2 text-sm ${tab === t ? 'border-b-2 border-[#0b1f3a] font-semibold' : 'text-slate-500'}`}>{t}</button>)}</div>
       <Card className={tab === 'Roster' || tab === 'Incidents' ? '!p-0 overflow-hidden' : ''}>
-        {tab === 'Reference photos' && user?.role !== 'ADMIN' && !user?.dev ? (
+        {!found && !loading && k !== 'reports' ? (
+          <EmptyState title="Details not available" text={own ? "This page belongs to another team. You can only open your own team and players." : 'This record could not be found, or you do not have access to it.'} action={<Link to={listPath} className={btnS}>Back to {label}</Link>} />
+        ) : tab === 'Reference photos' && user?.role !== 'ADMIN' && !user?.dev ? (
           loading ? <div className="space-y-2"><Skeleton /><Skeleton /></div> : player ? <PlayerPhotos playerId={player.id} name={player.name} /> : <EmptyState title="Details not available" text="This record could not be found, or you do not have access to it." />
         ) : tab === 'Reference photos' ? (
           <div className="space-y-3"><p className="text-sm text-slate-600">Front, back (jersey number) and optional side photos are used for identity matching. Today the detector reads photos from the <code>known_players</code> folder and learns faces automatically.</p><div className="flex flex-wrap gap-2"><label className={btnS + ' cursor-pointer'}><Upload size={16} />Upload photos<input type="file" accept="image/*" multiple className="sr-only" onChange={() => toast(NC, true)} /></label><button className={btnS} onClick={() => toast('Face embedding is done by the detector, not from the dashboard.', true)}><Cpu size={16} />Generate face embedding</button></div></div>
@@ -2038,7 +2039,24 @@ export function EventDetail({ collision = false }: { collision?: boolean }) {
   const assessment = useQuery({ queryKey: ['assessment', id], queryFn: () => getAssessment(Number(id)), enabled: staff && !!fromList })
   const markRead = useMarkRead()
   useEffect(() => { if (staff && fromList) markRead([fromList.id]) }, [staff, fromList?.id]) // eslint-disable-line react-hooks/exhaustive-deps
-  const actions = user?.role === 'MEDICAL' && <Link className={btnP} to={`/events/${id}/assessment`}>{assessment.data ? <><Pencil size={16} />Edit assessment</> : 'Medical review'}</Link>
+  const nav = useNavigate()
+  const toast = useToast()
+  const refresh = useRefreshAll()
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const removeEvent = async () => {
+    try {
+      await deleteEvent(Number(id))
+      toast(`Incident #${id} deleted.`)
+      refresh()
+      nav(collision ? '/collisions' : '/events', { replace: true })
+    } catch (x) { toast(normalizeApiError(x), true) }
+  }
+  const actions = <>
+    {user?.role === 'MEDICAL' && <Link className={btnP} to={`/events/${id}/assessment`}>{assessment.data ? <><Pencil size={16} />Edit assessment</> : 'Medical review'}</Link>}
+    {/* admin: remove a test event or a wrong detection */}
+    {user?.role === 'ADMIN' && !user.dev && fromList && <button className={btnS + ' !text-red-700'} onClick={() => setConfirmDelete(true)}><Trash2 size={16} />Delete event</button>}
+    <Confirm open={confirmDelete} title={`Delete incident #${id}?`} text="The event, its clip, AI results and medical assessment are removed for every user. This cannot be undone." confirmLabel="Delete event" onConfirm={removeEvent} onClose={() => setConfirmDelete(false)} />
+  </>
 
   if (ev.isLoading) return <><PageHeader title={title} crumbs={crumbs} actions={actions} /><Card className="space-y-3"><Skeleton className="aspect-video h-auto w-full" /><Skeleton /></Card></>
   if (!e) return <><PageHeader title={title} crumbs={crumbs} actions={actions} /><div className="mb-4"><Disclaimer /></div><Card>{ev.isError ? <ErrorState title="Unable to load this incident" text={normalizeApiError(ev.error)} onRetry={() => ev.refetch()} /> : <EmptyState title="Incident not found" text="It may have been deleted (for example by Gemini as a false alarm), or it belongs to a team you can't see." />}</Card></>
@@ -2486,6 +2504,7 @@ export function ErrorPage({ kind }: { kind: '403' | '404' | 'network' | 'generic
   const { user } = useAuth()
   const I = { '403': Lock, '404': FileQuestion, network: WifiOff, generic: ServerCrash }[kind]
   const T = { '403': ['Access denied', 'You don’t have permission to access this page.'], '404': ['Page not found', 'The page you requested does not exist.'], network: ['Network unavailable', 'Check your connection and try again.'], generic: ['Something went wrong', 'An unexpected error occurred. Please try again.'] }[kind]
+  usePageTitle(T[0])
   return <div className="grid place-items-center py-20 text-center"><I className="text-slate-400" size={48} /><h1 className="mt-3 text-2xl font-bold">{T[0]}</h1><p className="mt-1 text-slate-500">{T[1]}</p><Link className={btnP + ' mt-5'} to={user ? home[user.role] : '/login'}>Back to dashboard</Link></div>
 }
 

@@ -4,6 +4,7 @@ export const EP = {
   events: '/events',
   manualEvent: '/events/manual',
   assign: (id: number) => `/events/${id}/assign`,
+  event: (id: number) => `/events/${id}`,
   players: '/players',
   teams: '/teams',
   matches: '/matches',

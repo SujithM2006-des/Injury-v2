@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Inbox, AlertTriangle, X, CheckCircle2, ShieldAlert, UserX, UserCheck, HelpCircle, type LucideIcon } from 'lucide-react'
 import type { IdentityStatus, RiskLevel } from './types'
@@ -117,8 +117,16 @@ export function SafetyMeasures({ eventType, region, risk }: { eventType: string;
   )
 }
 
+/** Browser tab title, e.g. "Incident #580 · AthleteGuard" */
+export function usePageTitle(title: string) {
+  useEffect(() => {
+    document.title = title ? `${title} · AthleteGuard` : 'AthleteGuard'
+  }, [title])
+}
+
 export function PageHeader({ title, crumbs = [], actions, back = true }: { title: string; crumbs?: { label: string; to?: string }[]; actions?: ReactNode; back?: boolean }) {
   const nav = useNavigate()
+  usePageTitle(title)
   return (
     <div className="mb-6">
       <nav aria-label="Breadcrumb" className="mb-1.5 flex flex-wrap items-center gap-1 text-xs font-medium text-slate-400">
@@ -140,11 +148,48 @@ export function PageHeader({ title, crumbs = [], actions, back = true }: { title
   )
 }
 
+const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
+/** Closes the popup on Escape or a click outside `ref` (bell, profile menu). */
+export function useDismiss(open: boolean, onClose: () => void, ref: RefObject<HTMLElement>) {
+  useEffect(() => {
+    if (!open) return
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    const down = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onClose() }
+    document.addEventListener('keydown', key)
+    document.addEventListener('mousedown', down)
+    return () => { document.removeEventListener('keydown', key); document.removeEventListener('mousedown', down) }
+  }, [open, onClose, ref])
+}
+
 export function Modal({ open, title, onClose, children }: { open: boolean; title: string; onClose: () => void; children: ReactNode }) {
+  const box = useRef<HTMLDivElement>(null)
+  const close = useRef(onClose)
+  close.current = onClose
+
+  // keyboard: focus moves into the dialog, Tab stays inside, Escape closes, focus goes back afterwards
+  useEffect(() => {
+    if (!open) return
+    const before = document.activeElement as HTMLElement | null
+    const items = () => [...(box.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [])]
+    ;(items().find((el) => el.tagName !== 'BUTTON' || !el.getAttribute('aria-label')) ?? items()[0])?.focus()
+    const key = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.stopPropagation(); close.current() }
+      if (e.key !== 'Tab') return
+      const list = items()
+      if (!list.length) return
+      const first = list[0], last = list[list.length - 1]
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus() }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
+    }
+    document.addEventListener('keydown', key)
+    return () => { document.removeEventListener('keydown', key); before?.focus?.() }
+  }, [open])
+
   if (!open) return null
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-navy-950/60 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label={title} onClick={onClose}>
-      <div className="max-h-[90vh] w-full max-w-lg overflow-auto rounded-2xl bg-white p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+      <div ref={box} className="max-h-[90vh] w-full max-w-lg overflow-auto rounded-2xl bg-white p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-navy-900">{title}</h2>
           <button aria-label="Close" className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600" onClick={onClose}><X size={18} /></button>

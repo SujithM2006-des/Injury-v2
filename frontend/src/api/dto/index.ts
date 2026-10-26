@@ -2,6 +2,8 @@
 
 export interface LoginDto {
   access_token: string
+  /** base64 AES-256 key: decrypts this session's API responses (backend/secure_transport.py) */
+  session_key: string
   role: string // "admin" | "medical" | "coach" | "player"
   team_id: number | null
   username: string

@@ -10,6 +10,9 @@ export const toRole = (r: string): Role => {
   return v === 'ADMIN' ? 'ADMIN' : v === 'MEDICAL' ? 'MEDICAL' : v === 'PLAYER' ? 'PLAYER' : v === 'OWNER' ? 'OWNER' : 'COACH'
 }
 
+/** "fall" / " left  leg" -> "FALL" / "LEFT LEG" (same rule as _norm_code in backend/main.py) */
+const normCode = (v: string | null): string | null => (v ? v.trim().replace(/\s+/g, ' ').toUpperCase() || null : null)
+
 const toRisk = (r: string | null): RiskLevel | null => {
   const v = (r || '').toUpperCase()
   return v === 'LOW' || v === 'MEDIUM' || v === 'HIGH' ? v : null
@@ -40,8 +43,9 @@ export function toEvent(e: EventDto): InjuryEvent {
     identifiedAt: e.identified_at,
     matchId: e.match_session_id,
     matchName: e.match_name,
-    eventType: e.event_type,
-    region: e.region,
+    // one style everywhere, so "fall" and "FALL" are the same type in lists and charts
+    eventType: normCode(e.event_type) ?? 'EVENT',
+    region: normCode(e.region),
     risk: toRisk(e.risk),
     movement: e.movement,
     injuryNote: e.injury_note,

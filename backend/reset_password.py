@@ -16,6 +16,7 @@ import sys
 
 from passlib.context import CryptContext
 
+from crypto_store import lookup_hash
 from database import SessionLocal
 from models import User, Team
 
@@ -51,7 +52,7 @@ def main():
             print("Password must be at least 6 characters.")
             return
 
-        user = db.query(User).filter(User.username == username).first()
+        user = db.query(User).filter(User.username_lookup == lookup_hash(username)).first()
 
         if user is not None:
             user.password_hash = pwd_context.hash(password)
@@ -68,7 +69,7 @@ def main():
 
         team_id = None
         if role == "coach":
-            team = db.query(Team).filter(Team.name == team_name).first() if team_name else None
+            team = next((t for t in db.query(Team).all() if t.name.lower() == team_name.lower()), None) if team_name else None
             if team is None:
                 names = ", ".join(t.name for t in db.query(Team).all())
                 print(f"A new coach needs a valid team name. Teams: {names}")
