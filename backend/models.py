@@ -46,6 +46,9 @@ class User(Base):
     password_hash = Column(EncryptedText, nullable=False)
     role = Column(EncryptedText, nullable=False)
     team_id = Column(EncryptedInt, nullable=True)
+    # Gmail used for "Sign in with Google" (Firebase); email_lookup finds it without decrypting
+    email = Column(EncryptedText, nullable=True)
+    email_lookup = Column(String(64), unique=True, index=True, nullable=True)
 
     team = _link("Team", "team_id")
 
@@ -53,6 +56,12 @@ class User(Base):
         super().__init__(**kw)
         if self.username is not None and not self.username_lookup:
             self.username_lookup = lookup_hash(self.username)
+        if self.email and not self.email_lookup:
+            self.email_lookup = lookup_hash(self.email)
+
+    def set_email(self, email):
+        self.email = email or None
+        self.email_lookup = lookup_hash(email) if email else None
 
 
 class Player(Base):

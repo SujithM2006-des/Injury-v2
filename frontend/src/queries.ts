@@ -1,5 +1,6 @@
+import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { getAlertReads, getAssessments, getDetectorProgress, getEvents, getInjuryHistory, getMatches, getPlayers, getTeams } from './api/services'
+import { getAlertReads, getAssessments, getDetectorProgress, getEvents, getInjuryHistory, getLiveFrame, getMatches, getPlayers, getTeams } from './api/services'
 import { devMode, tokenStore } from './api/client'
 import type { InjuryEvent } from './types'
 
@@ -54,6 +55,40 @@ export const useAlertReads = (enabled = true) =>
 /** Live detector progress for match pages (every 5 s). */
 export const useDetector = (enabled = true) =>
   useQuery({ queryKey: ['detector'], queryFn: getDetectorProgress, refetchInterval: 5000, enabled: on() && enabled })
+
+export type LiveFrame = { src: string; seq: number; at: string | null }
+
+/** The detector's live view while it runs (null when nothing is live).
+ *  Asks for the next frame as soon as one arrives (the backend waits for a new one);
+ *  when no detection is running it checks again every 3 s. */
+export function useLiveFeed(enabled = true): LiveFrame | null {
+  const [frame, setFrame] = useState<LiveFrame | null>(null)
+  useEffect(() => {
+    if (!enabled || !on()) return
+    let stopped = false
+    let after = 0
+    const pause = (ms: number) => new Promise((r) => setTimeout(r, ms))
+    ;(async () => {
+      while (!stopped) {
+        try {
+          const f = await getLiveFrame(after)
+          if (stopped) break
+          if (f.live && f.image) {
+            after = f.seq
+            setFrame({ src: `data:image/jpeg;base64,${f.image}`, seq: f.seq, at: f.at ?? null })
+          } else {
+            setFrame(null)
+            await pause(3000)
+          }
+        } catch {
+          if (!stopped) { setFrame(null); await pause(3000) }
+        }
+      }
+    })()
+    return () => { stopped = true }
+  }, [enabled])
+  return frame
+}
 
 /** Previous injury history (medical/admin: every player, coach: own team). */
 export const useInjuryHistory = (enabled = true) =>

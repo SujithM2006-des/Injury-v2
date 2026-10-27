@@ -51,6 +51,7 @@ export function toEvent(e: EventDto): InjuryEvent {
     injuryNote: e.injury_note,
     note: e.note,
     clipUrl: e.clip_url ? API_BASE + e.clip_url : null,
+    thumbUrl: e.thumb_url ? API_BASE + e.thumb_url : null,
     source: e.source,
     resolved: !!e.resolved,
     timestamp: e.timestamp,
@@ -110,6 +111,8 @@ export const toMatch = (m: MatchDto): Match => ({ id: m.id, name: m.name, videoS
 export interface AppUser {
   id: number
   username: string
+  /** Gmail for "Sign in with Google" (null = password login only, admin) */
+  email: string | null
   role: Role
   teamId: number | null
   teamName: string | null
@@ -120,4 +123,4 @@ export interface AppUser {
   coaches: string[]
 }
 
-export const toUser = (u: UserDto): AppUser => ({ id: u.id, username: u.username, role: toRole(u.role), teamId: u.team_id, teamName: u.team_name, playerId: u.player_id ?? null, playerName: u.player_name ?? null, jersey: u.jersey_number ?? null, coaches: u.coaches ?? [] })
+export const toUser = (u: UserDto): AppUser => ({ id: u.id, username: u.username, email: u.email ?? null, role: toRole(u.role), teamId: u.team_id, teamName: u.team_name, playerId: u.player_id ?? null, playerName: u.player_name ?? null, jersey: u.jersey_number ?? null, coaches: u.coaches ?? [] })

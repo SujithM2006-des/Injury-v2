@@ -33,6 +33,7 @@ export default function App() {
                 <Route path="/coach/dashboard" element={<G roles={['COACH']}><P.Dashboard role="COACH" /></G>} />
                 <Route path="/medical/dashboard" element={<G roles={['MEDICAL']}><P.Dashboard role="MEDICAL" /></G>} />
                 <Route path="/owner/dashboard" element={<G roles={['OWNER']}><P.Dashboard role="OWNER" /></G>} />
+                <Route path="/live" element={<G roles={[...ALL, 'PLAYER']}><P.WatchLive /></G>} />
                 <Route path="/teams" element={<G roles={ALL}><P.ListPage k="teams" /></G>} />
                 <Route path="/teams/:id" element={<G roles={ALL}><P.Detail k="teams" /></G>} />
                 <Route path="/players" element={<G roles={ALL}><P.ListPage k="players" /></G>} />
@@ -53,7 +54,7 @@ export default function App() {
                 <Route path="/collisions/:id" element={<G roles={ALL}><P.EventDetail collision /></G>} />
                 <Route path="/alerts" element={<G roles={ALL}><P.Alerts /></G>} />
                 <Route path="/reports" element={<G roles={ALL}><P.ListPage k="reports" /></G>} />
-                <Route path="/reports/:id" element={<G roles={ALL}><P.Detail k="reports" /></G>} />
+                <Route path="/reports/:id" element={<Navigate to="/reports" replace />} />
                 <Route path="/admin/users" element={<G roles={['ADMIN', 'OWNER']}><P.ListPage k="users" /></G>} />
                 <Route path="/admin/system" element={<G roles={['ADMIN', 'OWNER']}><P.System /></G>} />
                 <Route path="/settings" element={<P.Settings />} />

@@ -1,12 +1,14 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import type { Role } from './types'
-import { login as loginSvc } from './api/services'
+import { firebaseLogin, login as loginSvc } from './api/services'
+import type { LoginDto } from './api/dto'
+import { googleIdToken } from './firebase'
 import { devMode, sessionKeyStore, setUnauthorizedHandler, tokenStore } from './api/client'
 import { toRole } from './api/mappers'
 
 export interface User { name: string; role: Role; teamId: number | null; dev?: boolean }
-interface Ctx { user: User | null; login: (u: string, p: string) => Promise<User>; devPreview: (r: Role) => void; logout: () => void }
+interface Ctx { user: User | null; login: (u: string, p: string) => Promise<User>; loginWithGoogle: () => Promise<User>; devPreview: (r: Role) => void; logout: () => void }
 
 const C = createContext<Ctx>(null as unknown as Ctx)
 export const useAuth = () => useContext(C)
@@ -42,8 +44,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Session expired -> log out (Layout then redirects to /login)
   useEffect(() => { setUnauthorizedHandler(logout) }, [logout])
 
-  const login = async (u: string, p: string) => {
-    const r = await loginSvc(u, p)
+  const login = async (u: string, p: string) => start(await loginSvc(u, p))
+
+  /** Sign in with Google (Firebase): Google checks the account, the backend checks the Gmail's role. */
+  const loginWithGoogle = async () => start(await firebaseLogin(await googleIdToken()))
+
+  const start = (r: LoginDto) => {
     qc.clear()
     tokenStore.set(r.access_token)
     sessionKeyStore.set(r.session_key)
@@ -64,5 +70,5 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser({ name: `Preview ${role.toLowerCase()}`, role, teamId: null, dev: true })
   }
 
-  return <C.Provider value={{ user, login, devPreview, logout }}>{children}</C.Provider>
+  return <C.Provider value={{ user, login, loginWithGoogle, devPreview, logout }}>{children}</C.Provider>
 }

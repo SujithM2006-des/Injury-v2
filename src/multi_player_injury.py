@@ -22,6 +22,7 @@ from alert_system import (
 from player_identifier import PlayerIdentifier
 import gemini_verifier
 import system_status
+import live_view
 
 # Gemini injury check (optional add-on). If the file is missing or fails to load,
 # detection carries on exactly as before.
@@ -1228,24 +1229,84 @@ def resolve_pending_identifications():
             del pending_identification[event_id]
 
 
-# DISPLAY WINDOW
-# Resizable window that opens at about the same size as before.
+# LIVE VIEW ON THE WEBSITE
+# Every logged-in user sees the detection live on the dashboard and the match monitor.
+live_view.start()
+
+# DISPLAY WINDOW (optional - the website shows the same picture)
+# Off by default. Turn it on with  $env:DETECTOR_WINDOW="1"  before starting the detector.
 #   - Maximize button (the square next to X): fills the screen, click it again to go back
-#   - F key: true full screen without the title bar, press F again to go back
+#   - F key: true full screen without the title bar, press F again to go back; Q = stop
+# Without the window, stop the detector with Ctrl+C: it still saves the clips and prints the report.
+SHOW_WINDOW = os.getenv("DETECTOR_WINDOW", "0").strip() == "1"
 WINDOW_NAME = "AI Injury Detection v2"
 WINDOW_WIDTH = 1100              # normal (not full screen) window width; height follows the video shape
-cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
 _vid_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1920
 _vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1080
 _win_w = min(WINDOW_WIDTH, _vid_w)
 _win_h = int(_win_w * _vid_h / _vid_w)
-cv2.resizeWindow(WINDOW_NAME, _win_w, _win_h)
 is_fullscreen = False
-print("Window: maximize button or F = full screen (press again to go back)")
+if SHOW_WINDOW:
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+    cv2.resizeWindow(WINDOW_NAME, _win_w, _win_h)
+    print("Window: maximize button or F = full screen (press again to go back), Q = stop")
+else:
+    print("No window: watch the detection live on the website. Press Ctrl+C here to stop.")
+
+# Ctrl+C: finish the current frame, then shut down normally (clips, report, WhatsApp)
+import signal
+stop_requested = False
+
+
+def _request_stop(signum, frame_):
+    global stop_requested
+    if stop_requested:
+        raise KeyboardInterrupt      # second Ctrl+C: stop at once
+    stop_requested = True
+    print("\n[STOP] Stopping after this frame - saving clips and the report...")
+
+
+signal.signal(signal.SIGINT, _request_stop)
+
+# PAUSE / STOP FROM THE WEBSITE (admin -> output/detector_control.json, encrypted)
+# Checked twice a second. A command only counts for this run (its match id) or when it names no run.
+CONTROL_FILE = os.path.join(OUTPUT_DIR, "detector_control.json")
+_control_checked = 0.0
+
+
+def read_control():
+    """(pause, stop) requested from the website."""
+    try:
+        ctl = crypto_store.load_json(CONTROL_FILE, {}) or {}
+    except Exception:
+        return False, False
+    if not isinstance(ctl, dict) or ctl.get("match_id") not in (None, match_id):
+        return False, False
+    return bool(ctl.get("paused")), bool(ctl.get("stop"))
+
 
 # VIDEO LOOP
 
-while True:
+while not stop_requested:
+    if _time.perf_counter() - _control_checked >= 0.5:
+        _control_checked = _time.perf_counter()
+        want_pause, want_stop = read_control()
+        if want_pause and not want_stop:
+            print("[PAUSE] Paused from the website - waiting for Resume...")
+            system_status.update(paused=True)
+            while want_pause and not want_stop and not stop_requested:
+                if "annotated_frame" in globals():
+                    live_view.push(annotated_frame)      # viewers keep seeing the paused picture
+                _time.sleep(0.5)
+                want_pause, want_stop = read_control()
+            system_status.update(paused=False)
+            _last_frame_t = _time.perf_counter()          # no fast catch-up after the pause
+            if not want_stop:
+                print("[PAUSE] Resumed")
+        if want_stop:
+            print("\n[STOP] Stop requested from the website - saving clips and the report...")
+            stop_requested = True
+            continue
     ret, frame = cap.read()
     if not ret:
         print("End of video reached (or read failed)")
@@ -1597,10 +1658,17 @@ while True:
         )
     # CLIP BUFFERS: annotated frame for the saved clip, raw frame for Gemini
     update_clips(shrink_for_clip(annotated_frame), shrink_for_clip(frame))
-    cv2.imshow(WINDOW_NAME, annotated_frame)
+    live_view.push(annotated_frame)
     # GPU BOOST: wait only for the time left in this frame, not a full extra frame
     _now = _time.perf_counter()
     _left_ms = int((1.0 / EFFECTIVE_FPS - (_now - globals().get('_last_frame_t', _now))) * 1000)
+    if not SHOW_WINDOW:
+        # no window: a video file still plays at its normal speed (a live camera never waits)
+        if SOURCE_MODE == "file" and _left_ms > 1:
+            _time.sleep(_left_ms / 1000.0)
+        _last_frame_t = _time.perf_counter()
+        continue
+    cv2.imshow(WINDOW_NAME, annotated_frame)
     key = cv2.waitKey(max(1, _left_ms)) & 0xFF
     _last_frame_t = _time.perf_counter()
     if key == ord("q"):
@@ -1617,8 +1685,10 @@ while True:
 
 # SHUTDOWN
 
+live_view.stop()
 cap.release()
-cv2.destroyAllWindows()
+if SHOW_WINDOW:
+    cv2.destroyAllWindows()
 calibration_log.close()
 
 print()

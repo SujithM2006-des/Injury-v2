@@ -1,12 +1,14 @@
-﻿import os
+import os
+import sys
 from typing import Optional
 
-from fastapi import FastAPI, Depends, HTTPException, Header, Query
+from fastapi import FastAPI, Depends, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from passlib.context import CryptContext
 from pydantic import BaseModel
 import base64
+import re
 import secrets
 
 from sqlalchemy import inspect, text
@@ -89,6 +91,13 @@ def _check_encryption_ready(engine):
     if not (users_ready and links_ready):
         raise RuntimeError("The database is not (fully) encrypted yet. Stop the backend and run once (backend folder):  "
                            "python encrypt_database.py")
+    # Gmail for "Sign in with Google" (added later): only adds what is missing
+    if "users" in tables and "email_lookup" not in {c["name"] for c in insp.get_columns("users")}:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT"))
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email_lookup VARCHAR(64)"))
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email_lookup ON users (email_lookup)"))
+        print("[BOOTSTRAP] added the Gmail columns for Google sign-in")
 
 # ============================================
 # GEMINI RULES
@@ -583,6 +592,7 @@ def event_to_dict(e: InjuryEvent):
         "note": e.note,
         "injury_note": e.injury_note,
         "clip_url": ("/clips/" + e.clip_path) if e.clip_path else None,
+        "thumb_url": ("/thumbs/" + e.clip_path + ".jpg") if e.clip_path else None,
         "source": e.source,
         "resolved": e.resolved,
         "timestamp": e.timestamp,
@@ -595,12 +605,97 @@ def event_to_dict(e: InjuryEvent):
 
 @app.post("/auth/login")
 def login(request: LoginRequest, db: Session = Depends(get_db)):
+    """Username + password: kept for the admin only (emergency way in when Google / Firebase is unreachable).
+    Everyone else signs in with Google (POST /auth/firebase)."""
 
     user = _user_named(db, request.username)
 
     if user is None or not verify_password(request.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Please use 'Sign in with Google' with the Gmail your administrator registered.")
+
+    return _issue_login(user)
+
+
+# ============================================
+# SIGN IN WITH GOOGLE (Firebase Authentication)
+# The browser signs in with Google through Firebase and sends the Firebase ID token here.
+# The token is checked against Google's public keys (signature, expiry, issuer and that it
+# was made for OUR Firebase project), the Gmail must be verified, and it must belong to a
+# login the admin registered - that login's role is used. No password is stored or seen.
+# FIREBASE_PROJECT_ID comes from .env (project root, src/.env or backend/.env).
+# ============================================
+
+class FirebaseLoginRequest(BaseModel):
+    id_token: str
+
+
+def _env_value(name):
+    if os.environ.get(name):
+        return os.environ[name].strip()
+    for path in (os.path.join(PROJECT_ROOT, ".env"), os.path.join(PROJECT_ROOT, "src", ".env"), os.path.join(PROJECT_ROOT, "backend", ".env")):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    k, _, v = line.strip().partition("=")
+                    if k.strip() == name and v.strip():
+                        return v.strip().strip('"').strip("'")
+        except OSError:
+            pass
+    return None
+
+
+def _norm_email(email):
+    return (email or "").strip().lower()
+
+
+def _user_with_email(db, email):
+    email = _norm_email(email)
+    return db.query(User).filter(User.email_lookup == lookup_hash(email)).first() if email else None
+
+
+@app.post("/auth/firebase")
+def firebase_login(request: FirebaseLoginRequest, db: Session = Depends(get_db)):
+
+    project_id = _env_value("FIREBASE_PROJECT_ID")
+    if not project_id:
+        raise HTTPException(status_code=503, detail="Google sign-in is not set up yet: FIREBASE_PROJECT_ID is missing in .env")
+
+    from google.oauth2 import id_token as google_id_token
+    from google.auth.transport import requests as google_requests
+
+    try:
+        # a token is brand new when it arrives: allow a small difference between this computer's
+        # clock and Google's (a PC clock a second behind made every fresh token "used too early")
+        claims = google_id_token.verify_firebase_token(request.id_token, google_requests.Request(),
+                                                       audience=project_id, clock_skew_in_seconds=60)
+    except Exception as e:
+        reason = str(e)
+        print("[AUTH] Firebase token rejected:", reason[:160])
+        if "too early" in reason or "expired" in reason.lower():
+            raise HTTPException(status_code=401, detail="Google sign-in failed because this computer's clock is wrong. "
+                                                        "Set Windows to 'Set time automatically', then try again.")
+        raise HTTPException(status_code=401, detail="Google sign-in could not be verified. Please try again.")
+
+    if not claims or claims.get("iss") != "https://securetoken.google.com/" + project_id:
+        raise HTTPException(status_code=401, detail="Google sign-in could not be verified. Please try again.")
+
+    email = _norm_email(claims.get("email"))
+    if not email or not claims.get("email_verified"):
+        raise HTTPException(status_code=401, detail="This Google account has no verified email address.")
+
+    user = _user_with_email(db, email)
+    if user is None:
+        print("[AUTH] Google sign-in refused for an unregistered Gmail")
+        raise HTTPException(status_code=403, detail=email + " is not registered in AthleteGuard. Ask your administrator to add this Gmail.")
+
+    print("[AUTH]", user.username, "signed in with Google (" + user.role + ")")
+    return _issue_login(user)
+
+
+def _issue_login(user):
     # sid -> this login's response key (secure_transport.py); the browser decrypts with session_key
     sid = secrets.token_urlsafe(18)
 
@@ -1296,6 +1391,88 @@ def get_teams(current_user: User = Depends(get_current_user), db: Session = Depe
 
 
 # ============================================
+# ADMIN — TEAMS AND PLAYERS (create team, register / edit player)
+# The detector loads the roster when it starts, so new players are used from the next run.
+# ============================================
+
+def _require_roster_admin(user):
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only the admin can add or change teams and players")
+
+
+class TeamCreateRequest(BaseModel):
+    name: str
+
+
+class PlayerRequest(BaseModel):
+    name: str
+    jersey_number: int
+    team_id: int
+
+
+def _check_player_fields(db, request, player_id=None):
+    name = " ".join((request.name or "").split())
+    if not name or len(name) > 80:
+        raise HTTPException(status_code=400, detail="Player name is required (80 characters at most)")
+    if not 1 <= int(request.jersey_number) <= 99:
+        raise HTTPException(status_code=400, detail="Jersey number must be between 1 and 99")
+    if db.query(Team).filter(Team.id == request.team_id).first() is None:
+        raise HTTPException(status_code=404, detail="Team not found")
+    clash = next((p for p in _players_of_team(db, request.team_id)
+                  if p.jersey_number == request.jersey_number and p.id != player_id), None)
+    if clash is not None:
+        raise HTTPException(status_code=409, detail="#" + str(request.jersey_number) + " is already " + clash.name + " in this team")
+    return name
+
+
+def _player_out(p):
+    return {"id": p.id, "name": p.name, "jersey_number": p.jersey_number, "team_id": p.team_id,
+            "team_name": p.team.name if p.team is not None else None}
+
+
+@app.post("/teams")
+def create_team(request: TeamCreateRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    _require_roster_admin(current_user)
+    name = " ".join((request.name or "").split())
+    if not name or len(name) > 60:
+        raise HTTPException(status_code=400, detail="Team name is required (60 characters at most)")
+    if _team_named(db, name) is not None:
+        raise HTTPException(status_code=409, detail="A team called " + name + " already exists")
+    team = Team(name=name)
+    db.add(team)
+    db.commit()
+    db.refresh(team)
+    print("[TEAMS]", current_user.username, "created team", name)
+    return {"id": team.id, "name": team.name}
+
+
+@app.post("/players")
+def create_player(request: PlayerRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    _require_roster_admin(current_user)
+    name = _check_player_fields(db, request)
+    player = Player(name=name, jersey_number=request.jersey_number, team_id=request.team_id)
+    db.add(player)
+    db.commit()
+    db.refresh(player)
+    print("[PLAYERS]", current_user.username, "registered", name, "#" + str(request.jersey_number))
+    return _player_out(player)
+
+
+@app.put("/players/{player_id}")
+def update_player(player_id: int, request: PlayerRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    _require_roster_admin(current_user)
+    player = db.query(Player).filter(Player.id == player_id).first()
+    if player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+    player.name = _check_player_fields(db, request, player_id)
+    player.jersey_number = request.jersey_number
+    player.team_id = request.team_id
+    db.commit()
+    db.refresh(player)
+    return _player_out(player)
+
+
+# ============================================
 # ADMIN — DELETE ONE EVENT (e.g. a test or wrong detection)
 # Removes the event, its clip (unless another event uses it) and its
 # AI results / medical assessment from the JSON stores.
@@ -1433,8 +1610,9 @@ MAX_PASSWORD_LENGTH = 72      # bcrypt only uses the first 72 bytes
 
 
 class UserCreateRequest(BaseModel):
-    username: str
-    password: str
+    username: Optional[str] = None    # defaults to the Gmail
+    password: Optional[str] = None    # admin logins only (emergency login); others sign in with Google
+    email: Optional[str] = None       # Gmail for "Sign in with Google" - required for every role except admin
     role: str                         # admin / medical / coach / player / owner
     team_id: Optional[int] = None     # required for coach and owner, ignored otherwise
     player_id: Optional[int] = None   # required for player: the roster player this login belongs to
@@ -1445,6 +1623,7 @@ def user_to_dict(u: User):
     out = {
         "id": u.id,
         "username": u.username,
+        "email": u.email,
         "role": u.role,
         "team_id": u.team_id,
         "team_name": u.team.name if u.team is not None else None,
@@ -1505,9 +1684,25 @@ def create_user(
 
     _require_admin_or_owner(current_user)
 
-    username = (request.username or "").strip()
-    password = request.password or ""
     role = (request.role or "").strip().lower()
+    email = _check_email(db, request.email) if (request.email or "").strip() else None
+    username = (request.username or "").strip() or (email or "")
+    password = request.password or ""
+
+    if role not in USER_ROLES:
+        raise HTTPException(status_code=400, detail="Role must be admin, medical, coach, player or owner")
+
+    # everyone signs in with Google except the admin, who keeps a password as the emergency way in
+    if role != "admin" and not email:
+        raise HTTPException(status_code=400, detail="Enter the Gmail this person signs in with")
+
+    if role == "admin" or password:
+        if len(password) < MIN_PASSWORD_LENGTH:
+            raise HTTPException(status_code=400, detail="Password must be at least " + str(MIN_PASSWORD_LENGTH) + " characters")
+        if len(password.encode("utf-8")) > MAX_PASSWORD_LENGTH:
+            raise HTTPException(status_code=400, detail="Password must be " + str(MAX_PASSWORD_LENGTH) + " characters or fewer")
+    else:
+        password = secrets.token_urlsafe(32)     # never used: this login only works with Google
 
     if not username:
         raise HTTPException(status_code=400, detail="Username is required")
@@ -1515,17 +1710,8 @@ def create_user(
     if any(ch.isspace() for ch in username):
         raise HTTPException(status_code=400, detail="Username cannot contain spaces")
 
-    if len(username) > 50:
-        raise HTTPException(status_code=400, detail="Username must be 50 characters or fewer")
-
-    if len(password) < MIN_PASSWORD_LENGTH:
-        raise HTTPException(status_code=400, detail="Password must be at least " + str(MIN_PASSWORD_LENGTH) + " characters")
-
-    if len(password.encode("utf-8")) > MAX_PASSWORD_LENGTH:
-        raise HTTPException(status_code=400, detail="Password must be " + str(MAX_PASSWORD_LENGTH) + " characters or fewer")
-
-    if role not in USER_ROLES:
-        raise HTTPException(status_code=400, detail="Role must be admin, medical, coach, player or owner")
+    if len(username) > 80:
+        raise HTTPException(status_code=400, detail="Username must be 80 characters or fewer")
 
     is_owner = current_user.role == "owner"
 
@@ -1582,6 +1768,7 @@ def create_user(
         role=role,
         team_id=team_id,
     )
+    user.set_email(email)
 
     db.add(user)
     db.commit()
@@ -1595,6 +1782,66 @@ def create_user(
     print("[USERS]", current_user.username, "created", username, "(" + role + ")")
 
     return {"message": "User created", "user": user_to_dict(user)}
+
+
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
+
+
+def _check_email(db, email, user_id=None):
+    """Lower-case Gmail (or other Google account); must be free (not on another login)."""
+    email = _norm_email(email)
+    if not EMAIL_PATTERN.match(email) or len(email) > 120:
+        raise HTTPException(status_code=400, detail="Enter a valid Gmail address, e.g. name@gmail.com")
+    other = _user_with_email(db, email)
+    if other is not None and other.id != user_id:
+        raise HTTPException(status_code=409, detail=email + " is already used by the login " + other.username)
+    return email
+
+
+class UserEmailRequest(BaseModel):
+    email: Optional[str] = None       # empty = remove the Gmail (Google sign-in off for this login)
+
+
+@app.put("/admin/users/{user_id}/email")
+def set_user_email(user_id: int, request: UserEmailRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Assign (or change) the Gmail a login signs in with."""
+    _require_admin_or_owner(current_user)
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if current_user.role == "owner" and (user.role not in OWNER_CAN_REMOVE or user.team_id != current_user.team_id):
+        raise HTTPException(status_code=403, detail="A team owner can only change their own team's coach and player logins")
+    email = _check_email(db, request.email, user.id) if (request.email or "").strip() else None
+    if email is None and user.role != "admin":
+        raise HTTPException(status_code=400, detail="Enter the Gmail this person signs in with")
+    user.set_email(email)
+    db.commit()
+    print("[USERS]", current_user.username, "set the Gmail of", user.username)
+    return {"message": "Gmail saved", "user": user_to_dict(user)}
+
+
+class PasswordResetRequest(BaseModel):
+    new_password: str
+
+
+@app.put("/admin/users/{user_id}/password")
+def reset_user_password(user_id: int, request: PasswordResetRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """'Forgot password': the admin (or a team owner, for their own coach / player logins) sets a new one."""
+    _require_admin_or_owner(current_user)
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if current_user.role == "owner" and (user.role not in OWNER_CAN_REMOVE or user.team_id != current_user.team_id):
+        raise HTTPException(status_code=403, detail="A team owner can only reset their own team's coach and player logins")
+    new = request.new_password or ""
+    if len(new) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(status_code=400, detail="Password must be at least " + str(MIN_PASSWORD_LENGTH) + " characters")
+    if len(new.encode("utf-8")) > MAX_PASSWORD_LENGTH:
+        raise HTTPException(status_code=400, detail="Password must be " + str(MAX_PASSWORD_LENGTH) + " characters or fewer")
+    user.password_hash = pwd_context.hash(new)
+    db.commit()
+    print("[USERS]", current_user.username, "reset the password of", user.username)
+    return {"message": "Password reset for " + user.username}
 
 
 @app.delete("/admin/users/{user_id}")
@@ -2083,6 +2330,12 @@ def _identifying_events(db, match_id, frame, fps):
 def detector_progress(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
 
     status = _read_detector_status()
+    control = _detector_control()
+
+    # started from the website, still loading the model (no heartbeat yet)
+    if _detector_launching(status, control):
+        return {"state": "launching", "match_name": control.get("match_name"), "video": control.get("video"),
+                "started_at": control.get("launched_at"), "identifying": []}
 
     if status is None:
         return {"state": "never"}
@@ -2099,6 +2352,7 @@ def detector_progress(current_user: User = Depends(get_current_user), db: Sessio
 
     info = status.get("info") or {}
     progress = status.get("progress") or {}
+    running = state in ("starting", "running")
 
     identifying = []
     if state in ("starting", "running"):
@@ -2118,6 +2372,286 @@ def detector_progress(current_user: User = Depends(get_current_user), db: Sessio
         "started_at": status.get("started_at"),
         "finished_at": status.get("finished_at"),
         "seconds_since_last_signal": seconds_ago,
+        "paused": bool(running and progress.get("paused")),
+        "stop_requested": bool(running and control.get("stop") and control.get("match_id") in (None, info.get("match_id"))),
+    }
+
+
+# ---------- run the detector from the website (admin) ----------
+# Videos live in <project>/videos. The admin uploads one (or picks one already there) and starts
+# the analysis; the backend launches src/multi_player_injury.py (no window, live view on the website).
+# Pause / resume / stop go through output/detector_control.json (encrypted), which the detector
+# checks twice a second - this also works for a run started from a terminal.
+# "Force stop" kills the process (clips still being written can be lost).
+
+import subprocess
+
+VIDEOS_DIR = os.path.join(PROJECT_ROOT, "videos")
+VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v")
+DETECTOR_SCRIPT = os.path.join(PROJECT_ROOT, "src", "multi_player_injury.py")
+DETECTOR_CONTROL_FILE = os.path.join(PROJECT_ROOT, "output", "detector_control.json")
+DETECTOR_LOG_FILE = os.path.join(PROJECT_ROOT, "output", "detector_run.log")
+LAUNCH_GRACE_SECONDS = 240         # model + face gallery loading before the first heartbeat
+MAX_VIDEO_BYTES = 8 * 1024 ** 3
+
+
+def _detector_control():
+    try:
+        data = _load_json(DETECTOR_CONTROL_FILE, {})
+    except Exception:
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+
+def _detector_launching(status, control):
+    launched = _band_time(control.get("launched_at"))
+    if launched is None or (_now_utc() - launched).total_seconds() > LAUNCH_GRACE_SECONDS:
+        return False
+    started = _band_time((status or {}).get("started_at"))
+    return started is None or started < launched
+
+
+def _detector_busy():
+    status = _read_detector_status() or {}
+    if _detector_launching(status, _detector_control()):
+        return True
+    last = _band_time(status.get("last_seen"))
+    return status.get("state") in ("starting", "running") and last is not None \
+        and (_now_utc() - last).total_seconds() <= HEARTBEAT_STALE_SECONDS
+
+
+def _safe_video_name(name):
+    base = os.path.basename(name or "").strip()
+    if not base or base != (name or "").strip() or base.startswith(".") or not base.lower().endswith(VIDEO_EXTENSIONS):
+        raise HTTPException(status_code=400, detail="Video files must be MP4, AVI, MOV, MKV, WEBM or M4V")
+    return base
+
+
+@app.get("/admin/videos")
+def list_videos(current_user: User = Depends(get_current_user)):
+    _admin_only(current_user)
+    out = []
+    if os.path.isdir(VIDEOS_DIR):
+        for name in sorted(os.listdir(VIDEOS_DIR)):
+            full = os.path.join(VIDEOS_DIR, name)
+            if os.path.isfile(full) and name.lower().endswith(VIDEO_EXTENSIONS):
+                out.append({"name": name, "size_mb": round(os.path.getsize(full) / 1048576, 1),
+                            "modified": datetime.fromtimestamp(os.path.getmtime(full), timezone.utc).isoformat()})
+    return out
+
+
+@app.put("/admin/videos/{filename}")
+async def upload_video(filename: str, request: Request, current_user: User = Depends(get_current_user)):
+    """Raw file body (not JSON), streamed to disk - works for match videos of several GB."""
+    _admin_only(current_user)
+    name = _safe_video_name(filename)
+    os.makedirs(VIDEOS_DIR, exist_ok=True)
+    target = os.path.join(VIDEOS_DIR, name)
+    if os.path.exists(target):
+        raise HTTPException(status_code=409, detail=name + " already exists - rename the file or pick it from the list")
+    tmp = target + ".part"
+    size = 0
+    try:
+        with open(tmp, "wb") as f:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > MAX_VIDEO_BYTES:
+                    raise HTTPException(status_code=400, detail="Videos are limited to 8 GB")
+                f.write(chunk)
+        if size == 0:
+            raise HTTPException(status_code=400, detail="The file is empty")
+        os.replace(tmp, target)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    print("[VIDEOS]", current_user.username, "uploaded", name, round(size / 1048576, 1), "MB")
+    return {"name": name, "size_mb": round(size / 1048576, 1)}
+
+
+class DetectorStartRequest(BaseModel):
+    video: str
+    match_name: Optional[str] = None
+
+
+@app.post("/admin/detector/start")
+def start_detector(request: DetectorStartRequest, current_user: User = Depends(get_current_user)):
+    _admin_only(current_user)
+    if _detector_busy():
+        raise HTTPException(status_code=409, detail="An analysis is already running. Stop it first.")
+    name = _safe_video_name(request.video)
+    video = os.path.join(VIDEOS_DIR, name)
+    if not os.path.isfile(video):
+        raise HTTPException(status_code=404, detail="Video not found in the videos folder")
+    match_name = " ".join((request.match_name or "").split())[:120] or None
+
+    args = [sys.executable, "-u", DETECTOR_SCRIPT, video] + ([match_name] if match_name else [])
+    env = dict(os.environ, DETECTOR_WINDOW="0", PYTHONIOENCODING="utf-8")
+    os.makedirs(os.path.dirname(DETECTOR_LOG_FILE), exist_ok=True)
+    log = open(DETECTOR_LOG_FILE, "w", encoding="utf-8")
+    # no console window and no detector window: the picture is shown on the website (Watch Live)
+    flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    proc = subprocess.Popen(args, cwd=os.path.dirname(DETECTOR_SCRIPT), stdout=log, stderr=subprocess.STDOUT,
+                            stdin=subprocess.DEVNULL, env=env, creationflags=flags)
+    log.close()
+
+    _save_json(DETECTOR_CONTROL_FILE, {"launched_at": _now_utc().isoformat(), "pid": proc.pid, "video": name,
+                                       "match_name": match_name, "paused": False, "stop": False, "match_id": None,
+                                       "started_by": current_user.username})
+    print("[DETECTOR]", current_user.username, "started", name, "| pid", proc.pid)
+    return {"message": "Analysis started", "pid": proc.pid, "video": name}
+
+
+def _running_match_id():
+    status = _read_detector_status() or {}
+    return (status.get("info") or {}).get("match_id")
+
+
+def _set_control(**changes):
+    control = _detector_control()
+    control.update(changes, match_id=_running_match_id())
+    _save_json(DETECTOR_CONTROL_FILE, control)
+    return control
+
+
+@app.post("/admin/detector/pause")
+def pause_detector(current_user: User = Depends(get_current_user)):
+    _admin_only(current_user)
+    if not _detector_busy():
+        raise HTTPException(status_code=409, detail="No analysis is running")
+    _set_control(paused=True)
+    return {"message": "Pausing"}
+
+
+@app.post("/admin/detector/resume")
+def resume_detector(current_user: User = Depends(get_current_user)):
+    _admin_only(current_user)
+    _set_control(paused=False)
+    return {"message": "Resuming"}
+
+
+@app.post("/admin/detector/stop")
+def stop_detector(force: bool = Query(False), current_user: User = Depends(get_current_user)):
+    _admin_only(current_user)
+    if not force:
+        if not _detector_busy():
+            raise HTTPException(status_code=409, detail="No analysis is running")
+        _set_control(stop=True, paused=False)
+        print("[DETECTOR]", current_user.username, "asked the detector to stop")
+        return {"message": "Stopping - the clips and the report are being saved"}
+
+    status = _read_detector_status() or {}
+    pids = {p for p in ((status.get("info") or {}).get("pid"), _detector_control().get("pid")) if p}
+    for pid in pids:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(int(pid)), "/T", "/F"], capture_output=True)
+        else:
+            try:
+                os.kill(int(pid), 9)
+            except OSError:
+                pass
+    _save_json(DETECTOR_CONTROL_FILE, {"paused": False, "stop": False})
+    if status.get("state") in ("starting", "running"):
+        status["state"] = "finished"
+        status["finished_at"] = _now_utc().isoformat()
+        _save_json(DETECTOR_STATUS_FILE, status)
+    print("[DETECTOR]", current_user.username, "force-stopped pid(s)", sorted(pids))
+    return {"message": "Detector stopped"}
+
+
+@app.get("/admin/detector/log")
+def detector_log(lines: int = Query(60), current_user: User = Depends(get_current_user)):
+    _admin_only(current_user)
+    try:
+        with open(DETECTOR_LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
+            text_lines = f.read().splitlines()
+    except OSError:
+        text_lines = []
+    return {"lines": text_lines[-max(1, min(lines, 400)):]}
+
+
+# ---------- clip thumbnails ----------
+# A small JPEG of the fall moment (middle of the clip), made the first time it is asked for
+# and kept in output/clips/thumbs. Lists show it instead of loading the whole clip.
+
+THUMBS_DIR = os.path.join(CLIPS_DIR, "thumbs")
+
+
+@app.get("/thumbs/{name}")
+def clip_thumbnail(name: str):
+    base = os.path.basename(name)
+    if base != name or not base.endswith(".jpg"):
+        raise HTTPException(status_code=404, detail="Not found")
+    clip = os.path.join(CLIPS_DIR, base[:-4])
+    if not os.path.isfile(clip):
+        raise HTTPException(status_code=404, detail="Not found")
+    thumb = os.path.join(THUMBS_DIR, base)
+    if not os.path.isfile(thumb) or os.path.getmtime(thumb) < os.path.getmtime(clip):
+        import cv2
+        cap = cv2.VideoCapture(clip)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        frames = []
+        while len(frames) < int(fps * 3) + 1:        # clips are 3 s before + 3 s after the fall
+            ok, img = cap.read()
+            if not ok:
+                break
+            frames.append(img)
+        cap.release()
+        if not frames:
+            raise HTTPException(status_code=404, detail="Clip cannot be read")
+        img = frames[-1]
+        h, w = img.shape[:2]
+        if w > 480:
+            img = cv2.resize(img, (480, int(h * 480 / w)), interpolation=cv2.INTER_AREA)
+        os.makedirs(THUMBS_DIR, exist_ok=True)
+        cv2.imwrite(thumb, img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    return FileResponse(thumb, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
+
+
+# ---------- live detection view (src/live_view.py) ----------
+# The detector posts its annotated frame (JPEG) a few times a second; only the newest one is
+# kept, in memory (never on disk). Every logged-in user reads it through the encrypted channel:
+# GET /live/frame?after=<seq> waits up to LIVE_WAIT_SEC for a newer frame than <seq>.
+
+import asyncio
+
+LIVE_MAX_BYTES = 3 * 1024 * 1024
+LIVE_FRESH_SEC = 5            # no frame for this long = not live any more
+LIVE_WAIT_SEC = 2.0
+
+_live = {"jpeg": None, "seq": 0, "at": None}
+_live_event = asyncio.Event()
+
+
+@app.post("/live/frame")
+async def live_frame_in(request: Request):
+    global _live_event
+    data = await request.body()
+    if not data or len(data) > LIVE_MAX_BYTES or not data.startswith(b"\xff\xd8"):
+        raise HTTPException(status_code=400, detail="Send one JPEG frame (max 3 MB)")
+    _live.update(jpeg=data, seq=_live["seq"] + 1, at=_now_utc())
+    event, _live_event = _live_event, asyncio.Event()
+    event.set()              # wakes every viewer waiting for this frame
+    return {"seq": _live["seq"]}
+
+
+def _live_is_fresh():
+    return _live["at"] is not None and (_now_utc() - _live["at"]).total_seconds() <= LIVE_FRESH_SEC
+
+
+@app.get("/live/frame")
+async def live_frame_out(after: int = Query(0), current_user: User = Depends(get_current_user)):
+    if _live_is_fresh() and _live["seq"] <= after:
+        try:
+            await asyncio.wait_for(_live_event.wait(), timeout=LIVE_WAIT_SEC)
+        except asyncio.TimeoutError:
+            pass
+    if not _live_is_fresh():
+        return {"live": False, "seq": _live["seq"], "image": None}
+    return {
+        "live": True,
+        "seq": _live["seq"],
+        "at": _live["at"],
+        "image": base64.b64encode(_live["jpeg"]).decode("ascii"),
     }
 
 

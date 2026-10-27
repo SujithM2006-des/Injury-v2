@@ -4,8 +4,19 @@ import type { AssessmentDto, DetectorProgressDto, EventDto, InjuryHistoryDto, Lo
 import { toEvent, toMatch, toPlayer, toTeam, toUser, type AppUser } from '../mappers'
 import type { InjuryEvent, Match, Player, RiskLevel, Role, Team } from '../../types'
 
+/** Admin emergency login (username + password). */
 export async function login(username: string, password: string): Promise<LoginDto> {
   return (await api.post<LoginDto>(EP.login, { username, password })).data
+}
+
+/** Sign in with Google: the backend checks the Firebase ID token and the Gmail's assigned role. */
+export async function firebaseLogin(idToken: string): Promise<LoginDto> {
+  return (await api.post<LoginDto>(EP.firebaseLogin, { id_token: idToken })).data
+}
+
+/** Assign / change the Gmail a login signs in with (admin; owner for own coach / player logins). */
+export async function setUserEmail(userId: number, email: string | null): Promise<AppUser> {
+  return toUser((await api.put<{ user: UserDto }>(EP.userEmail(userId), { email })).data.user)
 }
 
 /** Medical/admin get every event; coaches get their team's events plus Unidentified ones. */
@@ -54,8 +65,8 @@ export async function getUsers(): Promise<AppUser[]> {
 }
 
 /** Admin, or a team owner for their own team (coach / player only). A coach or owner needs a team, a player login needs its roster player. */
-export async function createUser(v: { username: string; password: string; role: Role; teamId: number | null; playerId?: number | null }): Promise<AppUser> {
-  const r = await api.post<{ user: UserDto }>(EP.users, { username: v.username, password: v.password, role: v.role.toLowerCase(), team_id: v.role === 'COACH' || v.role === 'OWNER' ? v.teamId : null, player_id: v.role === 'PLAYER' ? v.playerId ?? null : null })
+export async function createUser(v: { email: string; password?: string; role: Role; teamId: number | null; playerId?: number | null }): Promise<AppUser> {
+  const r = await api.post<{ user: UserDto }>(EP.users, { email: v.email || null, password: v.password || null, role: v.role.toLowerCase(), team_id: v.role === 'COACH' || v.role === 'OWNER' ? v.teamId : null, player_id: v.role === 'PLAYER' ? v.playerId ?? null : null })
   return toUser(r.data.user)
 }
 
@@ -118,6 +129,59 @@ export async function markAlertsRead(ids: number[]): Promise<number[]> {
 /** The detector's live progress (every role). */
 export async function getDetectorProgress(): Promise<DetectorProgressDto> {
   return (await api.get<DetectorProgressDto>(EP.detector)).data
+}
+
+/* ---------- admin: teams, players, passwords ---------- */
+
+export async function createTeam(name: string): Promise<void> {
+  await api.post(EP.teams, { name })
+}
+
+/** Register (no id) or edit (with id) a roster player. */
+export async function savePlayer(v: { id?: number; name: string; jersey: number; teamId: number }): Promise<Player> {
+  const body = { name: v.name, jersey_number: v.jersey, team_id: v.teamId }
+  const r = v.id ? await api.put<PlayerDto>(EP.player(v.id), body) : await api.post<PlayerDto>(EP.players, body)
+  return toPlayer(r.data)
+}
+
+/** Admin, or a team owner for their own coach / player logins. */
+export async function resetUserPassword(userId: number, newPassword: string): Promise<void> {
+  await api.put(EP.userPassword(userId), { new_password: newPassword })
+}
+
+/* ---------- admin: run the detector from the website ---------- */
+
+export type VideoFile = { name: string; size_mb: number; modified: string }
+
+export async function getVideos(): Promise<VideoFile[]> {
+  return (await api.get<VideoFile[]>(EP.videos)).data
+}
+
+/** Streams the file as the request body (match videos can be several GB). */
+export async function uploadVideo(file: File, onProgress: (pct: number) => void): Promise<void> {
+  await api.put(EP.video(file.name), file, {
+    headers: { 'Content-Type': 'application/octet-stream' },
+    timeout: 0,
+    onUploadProgress: (e) => onProgress(e.total ? Math.round((100 * e.loaded) / e.total) : 0),
+  })
+}
+
+export async function startDetector(video: string, matchName: string): Promise<void> {
+  await api.post(EP.detectorStart, { video, match_name: matchName || null })
+}
+
+export async function controlDetector(action: 'pause' | 'resume' | 'stop' | 'force'): Promise<string> {
+  const url = action === 'pause' ? EP.detectorPause : action === 'resume' ? EP.detectorResume : EP.detectorStop
+  return (await api.post<{ message: string }>(url, undefined, { params: action === 'force' ? { force: true } : {} })).data.message
+}
+
+export async function getDetectorLog(): Promise<string[]> {
+  return (await api.get<{ lines: string[] }>(EP.detectorLog, { params: { lines: 40 } })).data.lines
+}
+
+/** Newest live detection frame (JPEG, base64). Waits up to 2 s for a frame newer than `after`. */
+export async function getLiveFrame(after: number): Promise<{ live: boolean; seq: number; at?: string; image: string | null }> {
+  return (await api.get(EP.liveFrame, { params: { after } })).data
 }
 
 export async function getPlayerPhotos(playerId: number): Promise<PlayerPhotosDto> {

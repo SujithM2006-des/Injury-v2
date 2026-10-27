@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
@@ -6,24 +6,24 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { Shield, Eye, EyeOff, Plus, Play, Pause, Square, RotateCcw, Maximize, Upload, VideoOff, CheckCheck, Download, RefreshCw, WifiOff, Lock, FileQuestion, ServerCrash, Cpu, ChevronRight, ChevronDown, ClipboardPlus, Trash2, Sparkles, UserCheck, History, ExternalLink, ImageOff, CheckCircle2, Pencil, Loader2, Activity, Bell, Zap, FileText, CalendarDays, Users, HeartPulse, type LucideIcon } from 'lucide-react'
 import { useAuth, home } from './auth'
+import { controlDetector, createTeam, getDetectorLog, getVideos, resetUserPassword, savePlayer, setUserEmail, startDetector, uploadVideo } from './api/services'
 import { addInjuryHistory, assignPlayer, clearAllEvents, createUser, deleteEvent, deleteInjuryHistory, deletePlayerPhoto, deleteUser, getAssessment, getMe, getPlayerPhotoBlob, getPlayerPhotos, getSystemStatus, getUsers, logManualEvent, markAlertsRead, reopenEvent, resolveEvent, saveAssessment, updateInjuryHistory, uploadPlayerPhoto, type AssessmentInput, type InjuryHistoryInput } from './api/services'
 import { normalizeApiError } from './api/client'
 import { AdminSettingsPage } from './adminSettings'
 import type { AppUser } from './api/mappers'
 import type { AssessmentDto, DetectorInfoDto, DetectorProgressDto, InjuryHistoryDto, SystemDto } from './api/dto'
-import { useAlertReads, useAssessments, useDetector, useEvents, useInjuryHistory, useMatches, usePlayers, useTeams } from './queries'
+import { useAlertReads, useAssessments, useDetector, useEvents, useInjuryHistory, useLiveFeed, useMatches, usePlayers, useTeams, type LiveFrame } from './queries'
 import { dateOptions } from './prefs'
 import type { InjuryEvent, Player, RiskLevel, Role } from './types'
 import { BodyMap, FootballerBack, RoleArt, StadiumBackdrop } from './art'
 import { safetyMeasures, SAFETY_DISCLAIMER } from './safety'
 import { Badge, BarList, Card, Confirm, Disclaimer, DISCLAIMER_2, Donut, EmptyState, ErrorState, Field, IdentityBadge, KpiCard, Logo, LogoMark, Modal, Na, PageHeader, RiskBadge, SafetyMeasures, SERIES, Skeleton, STATUS_COLOR, TrendLine, btn, btnD, btnP, btnS, inp, inpAuto, usePageTitle, useToast, type TileTone, type Tone } from './ui'
+import { KeyRound } from 'lucide-react'
+import { firebaseReady } from './firebase'
 import { ArrowRight, BellRing, BrainCircuit, ClipboardCheck, Crown, Mail, ScanFace, ShieldAlert, ShieldCheck, Stethoscope, UserCog, Video } from 'lucide-react'
 
 /** Small outlined button used instead of text links */
 export const btnSm = `${btnS} !gap-1.5 !px-2.5 !py-1 !text-xs`
-
-/** Shown when a button needs something the backend doesn't have yet. */
-const NC = "Not available yet: the backend doesn't support this. Nothing was saved."
 
 /* ---------- HELPERS ---------- */
 
@@ -51,7 +51,10 @@ export const fmtVideo = (s: number | null) => {
   const x = Math.floor(s)
   return `${Math.floor(x / 3600)}:${String(Math.floor((x % 3600) / 60)).padStart(2, '0')}:${String(x % 60).padStart(2, '0')}`
 }
-export const fmtDate = (v: string | null) => (v ? new Date(v).toLocaleString(undefined, dateOptions()) : '—')
+/* ---------- one date style everywhere ----------
+ * date + time: "26 Oct 2026, 04:15"   date only: "26 Oct 2026"   (12 / 24 h follows the Settings page) */
+const DATE_PARTS: Intl.DateTimeFormatOptions = { day: 'numeric', month: 'short', year: 'numeric' }
+export const fmtDate = (v: string | null) => (v ? new Date(v).toLocaleString(undefined, { ...DATE_PARTS, hour: '2-digit', minute: '2-digit', ...dateOptions() }) : '—')
 const fileName = (p: string | null) => (p ? p.split(/[\\/]/).pop() ?? p : '—')
 
 /** Gemini works only in the background: no Gemini badge, verdict or confidence is shown anywhere.
@@ -89,8 +92,8 @@ export function useIdentifying() {
 
 /** "fall_test - 14 Oct 2026 13:54" -> "fall_test" (the date is when the run started, not when the fall happened) */
 export const matchShort = (name: string | null) => (name ? name.replace(/\s+-\s+\d{1,2} \w{3} \d{4} \d{1,2}:\d{2}$/, '') : null)
-/** When the fall was detected, e.g. "14 Oct, 05:17 pm" */
-export const fmtWhen = (v: string | null) => (v ? new Date(v).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—')
+/** When the fall was detected (same style as fmtDate) */
+export const fmtWhen = fmtDate
 
 /** Thin bar with "Identifying player… 42%" */
 export function IdentifyingBar({ pct }: { pct: number }) {
@@ -247,7 +250,7 @@ function PlayerHistory({ playerId, name }: { playerId: number; name: string }) {
           <div key={e.id} className="grid gap-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm lg:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
             <div>
               {e.clipUrl ? (
-                <video className="aspect-video w-full rounded-xl bg-black" src={e.clipUrl} controls preload="metadata" />
+                <video className="aspect-video w-full rounded-xl bg-black" src={e.clipUrl} poster={e.thumbUrl ?? undefined} controls preload="none" />
               ) : (
                 <div className="grid aspect-video place-items-center rounded-xl bg-slate-100 text-sm text-slate-500">{e.source === 'manual' ? 'Logged by staff — no video' : 'No clip saved for this event'}</div>
               )}
@@ -296,7 +299,7 @@ const HISTORY_STATUS = ['Recovered', 'Recovering', 'Ongoing']
 const SEVERITY_TONE: Record<string, Tone> = { Minor: 'green', Moderate: 'amber', Severe: 'red' }
 const HSTATUS_TONE: Record<string, Tone> = { Recovered: 'green', Recovering: 'amber', Ongoing: 'red' }
 const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` }
-const fmtDay = (iso: string) => { const d = new Date(iso + 'T00:00:00'); return isNaN(+d) ? iso : d.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' }) }
+export const fmtDay = (iso: string) => { const d = new Date(iso.length === 10 ? iso + 'T00:00:00' : iso); return isNaN(+d) ? iso : d.toLocaleDateString(undefined, DATE_PARTS) }
 
 /** Admin edits every player; a coach edits their own team. */
 const canEditHistory = (u: { role: Role; teamId: number | null; dev?: boolean } | null, p?: { teamId: number }) =>
@@ -585,13 +588,23 @@ const LANDING_ROLES: [LucideIcon, string, string][] = [
   [UserCheck, 'Player', 'See your own falls, expected rest, history and medical outcome.'],
 ]
 
+/** Google "G" mark for the sign-in button */
+const GoogleLogo = () => (
+  <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
+    <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z" />
+    <path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z" />
+    <path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z" />
+    <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z" />
+  </svg>
+)
+
 export function Login() {
-  const { login, devPreview, user } = useAuth()
+  const { login, loginWithGoogle, user } = useAuth()
   const nav = useNavigate()
   const [show, setShow] = useState(false)
   const [err, setErr] = useState('')
   const [forgot, setForgot] = useState(false)
-  const [sent, setSent] = useState(false)
+  const [googleBusy, setGoogleBusy] = useState(false)
   const f = useForm<z.infer<typeof ls>>({ resolver: zodResolver(ls) })
   usePageTitle('Login')
   if (user) return <Navigate to={home[user.role]} replace />
@@ -604,9 +617,20 @@ export function Login() {
       setErr(normalizeApiError(e))
     }
   })
+  const google = async () => {
+    setErr(''); setGoogleBusy(true)
+    try {
+      const u = await loginWithGoogle()
+      nav(home[u.role], { replace: true })
+    } catch (e) {
+      setErr(normalizeApiError(e))
+    } finally {
+      setGoogleBusy(false)
+    }
+  }
   const toLogin = () => {
     document.getElementById('login')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    setTimeout(() => document.getElementById('login-user')?.focus(), 400)
+    setTimeout(() => document.getElementById('google-login')?.focus(), 400)
   }
   const iconInp = inp + ' !pl-10'
 
@@ -615,34 +639,38 @@ export function Login() {
       <div className="mb-6 flex justify-center"><Logo dark={false} size={40} /></div>
       {forgot ? (
         <div className="space-y-3">
-          <h2 className="text-xl font-bold text-navy-900">Reset password</h2>
-          <p className="text-sm text-slate-600">Enter your email and an administrator-approved reset link will be sent when password reset is enabled.</p>
-          <input className={inp} type="email" placeholder="Email" aria-label="Email" />
-          {sent && <p className="text-sm text-amber-700">Password reset is not available yet. Ask your administrator to reset your password.</p>}
-          <button className={btnP + ' w-full justify-center !py-3'} onClick={() => setSent(true)}>Send reset link</button>
-          <button className={btnS + ' w-full justify-center'} onClick={() => { setForgot(false); setSent(false) }}>Back to login</button>
+          <h2 className="text-xl font-bold text-navy-900">Can't sign in?</h2>
+          <ul className="space-y-2 text-sm text-slate-700">
+            <li className="rounded-xl bg-slate-50 p-3"><b>Forgot your Google password?</b> Reset it at Google (accounts.google.com). AthleteGuard never stores it.</li>
+            <li className="rounded-xl bg-slate-50 p-3"><b>"Not registered"?</b> Your Gmail has not been added yet. Coaches and players: ask your team owner or the administrator. Medical staff and team owners: ask the administrator.</li>
+            <li className="rounded-xl bg-slate-50 p-3"><b>Administrator password lost?</b> Run <code>python reset_password.py</code> on the server.</li>
+          </ul>
+          <button className={btnS + ' w-full justify-center'} onClick={() => setForgot(false)}>Back to login</button>
         </div>
       ) : (
-        <form onSubmit={go} className="space-y-4" noValidate>
+        /* one card: username + password on top, "Sign in with Google" below it (where the preview buttons were) */
+        <div className="space-y-4">
           <div><h2 className="text-2xl font-bold text-navy-900">Welcome back!</h2><p className="text-sm text-slate-500">Sign in to your account</p></div>
           {err && <div role="alert" className="rounded-xl bg-red-50 p-3 text-sm text-red-800 ring-1 ring-inset ring-red-600/15">{err}</div>}
-          <Field label="Username or email" err={f.formState.errors.username?.message}>
-            <div className="relative"><Mail size={16} className="absolute left-3.5 top-3 text-slate-400" /><input id="login-user" className={iconInp} placeholder="Email or username" autoComplete="username" {...f.register('username')} /></div>
-          </Field>
-          <Field label="Password" err={f.formState.errors.password?.message}>
-            <div className="relative"><Lock size={16} className="absolute left-3.5 top-3 text-slate-400" /><input className={iconInp + ' !pr-10'} placeholder="Password" type={show ? 'text' : 'password'} autoComplete="current-password" {...f.register('password')} /><button type="button" aria-label={show ? 'Hide password' : 'Show password'} className="absolute right-3.5 top-3 text-slate-400 hover:text-slate-600" onClick={() => setShow((s) => !s)}>{show ? <EyeOff size={16} /> : <Eye size={16} />}</button></div>
-          </Field>
-          <div className="flex justify-end"><button type="button" className="text-sm font-medium text-brand-600 hover:underline" onClick={() => setForgot(true)}>Forgot password?</button></div>
-          <button className={btnP + ' w-full justify-center !py-3 text-[15px]'} disabled={f.formState.isSubmitting}>{f.formState.isSubmitting ? 'Signing in…' : 'Login'}</button>
-        </form>
+          <form onSubmit={go} className="space-y-3" noValidate>
+            <Field label="Username or email" err={f.formState.errors.username?.message}>
+              <div className="relative"><Mail size={16} className="absolute left-3.5 top-3 text-slate-400" /><input id="login-user" className={iconInp} placeholder="Email or username" autoComplete="username" {...f.register('username')} /></div>
+            </Field>
+            <Field label="Password" err={f.formState.errors.password?.message}>
+              <div className="relative"><Lock size={16} className="absolute left-3.5 top-3 text-slate-400" /><input className={iconInp + ' !pr-10'} placeholder="Password" type={show ? 'text' : 'password'} autoComplete="current-password" {...f.register('password')} /><button type="button" aria-label={show ? 'Hide password' : 'Show password'} className="absolute right-3.5 top-3 text-slate-400 hover:text-slate-600" onClick={() => setShow((s) => !s)}>{show ? <EyeOff size={16} /> : <Eye size={16} />}</button></div>
+            </Field>
+            <button className={btnP + ' w-full justify-center !py-3 text-[15px]'} disabled={f.formState.isSubmitting}>{f.formState.isSubmitting ? 'Signing in…' : 'Login'}</button>
+          </form>
+          <div className="flex justify-end"><button type="button" className="text-sm font-medium text-brand-600 hover:underline" onClick={() => setForgot(true)}>Can't sign in?</button></div>
+          <div className="flex items-center gap-3 text-xs font-medium text-slate-400"><span className="h-px flex-1 bg-slate-200" />OR SIGN IN WITH GOOGLE<span className="h-px flex-1 bg-slate-200" /></div>
+          <button id="google-login" type="button" onClick={google} disabled={googleBusy || !firebaseReady}
+            className="flex w-full items-center justify-center gap-3 rounded-xl border border-slate-300 bg-white px-4 py-3 text-[15px] font-semibold text-slate-800 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60">
+            {googleBusy ? <Loader2 size={18} className="animate-spin" /> : <GoogleLogo />}{googleBusy ? 'Signing in…' : 'Sign in with Google'}
+          </button>
+          {!firebaseReady && <p className="rounded-lg bg-amber-50 p-2.5 text-xs text-amber-800">Google sign-in is not set up yet: the Firebase settings are missing in <code>frontend/.env</code>.</p>}
+          <p className="text-center text-[11px] text-slate-400">Password login is for administrators. Coaches, medical staff, owners and players: use Sign in with Google.</p>
+        </div>
       )}
-      <div className="my-5 flex items-center gap-3 text-xs font-medium text-slate-400"><span className="h-px flex-1 bg-slate-200" />OR PREVIEW WITHOUT LOGIN<span className="h-px flex-1 bg-slate-200" /></div>
-      <div className="grid grid-cols-3 gap-2">
-        {([['ADMIN', ShieldCheck], ['MEDICAL', Stethoscope], ['COACH', Users]] as [Role, LucideIcon][]).map(([r, I]) => (
-          <button key={r} className={btnS + ' justify-center !px-2 !text-xs'} onClick={() => { devPreview(r); nav(home[r]) }}><I size={14} className="text-brand-600" />{r.charAt(0) + r.slice(1).toLowerCase()}</button>
-        ))}
-      </div>
-      <p className="mt-2 text-center text-[11px] text-slate-400">Preview shows the screens only, no backend data.</p>
       <p className="mt-4 text-center text-xs text-slate-500">Don't have an account? Ask your organization's administrator.</p>
     </div>
   )
@@ -863,8 +891,9 @@ const TYPE_COLOR = (types: string[]) => new Map(types.map((t, i) => [t, SERIES[M
 
 /** Small first-frame preview of a clip (or a placeholder when there is no clip). */
 function ClipThumb({ e, className = '' }: { e: InjuryEvent; className?: string }) {
-  return e.clipUrl
-    ? <video src={`${e.clipUrl}#t=0.8`} preload="metadata" muted playsInline className={`aspect-video shrink-0 rounded-lg bg-navy-900 object-cover ${className}`} />
+  const [broken, setBroken] = useState(false)      // clip file deleted (e.g. old clips cleaned up)
+  return e.thumbUrl && !broken
+    ? <img src={e.thumbUrl} alt={`Fall moment, incident #${e.id}`} loading="lazy" onError={() => setBroken(true)} className={`aspect-video shrink-0 rounded-lg bg-navy-900 object-cover ${className}`} />
     : <span className={`grid aspect-video shrink-0 place-items-center rounded-lg bg-slate-100 text-slate-400 ${className}`}><VideoOff size={14} /></span>
 }
 
@@ -911,7 +940,7 @@ function MatchAnalysisPanel({ list, typeColor }: { list: InjuryEvent[]; typeColo
         <div className="min-w-0">
           <div className="relative overflow-hidden rounded-xl bg-navy-950">
             {sel.clipUrl
-              ? <video key={sel.id} src={sel.clipUrl} controls muted playsInline preload="metadata" className="aspect-video w-full" />
+              ? <video key={sel.id} src={sel.clipUrl} poster={sel.thumbUrl ?? undefined} controls muted playsInline preload="none" className="aspect-video w-full" />
               : <div className="grid aspect-video place-items-center text-sm text-slate-400"><span className="flex items-center gap-2"><VideoOff size={18} />No clip saved for this incident</span></div>}
             <div className="pointer-events-none absolute left-3 top-3 rounded-lg border-2 px-2.5 py-1 text-xs font-bold text-white shadow" style={{ borderColor: STATUS_COLOR[sel.risk ?? 'LOW'], background: 'rgba(6,18,41,.72)' }}>
               {sel.eventType}{sel.region ? ` · ${sel.region}` : ''}{conf(sel) !== null ? ` · ${conf(sel)}%` : ''}
@@ -955,7 +984,96 @@ function MatchAnalysisPanel({ list, typeColor }: { list: InjuryEvent[]; typeColo
   )
 }
 
+/** The detector's live picture (boxes, skeletons, "REGION | RISK") while a match is being analysed. */
+export function LivePanel({ frame, className = '' }: { frame: LiveFrame; className?: string }) {
+  const d = useDetector().data
+  const box = useRef<HTMLDivElement>(null)
+  const running = d && (d.state === 'running' || d.state === 'starting')
+  const pct = running && d.frame && d.total_frames ? Math.min(100, Math.round((100 * d.frame) / d.total_frames)) : null
+  return (
+    <Card className={`!p-0 ${className}`}>
+      <div className="flex flex-wrap items-center gap-3 border-b border-slate-100 px-5 py-4">
+        {d?.paused
+          ? <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500 px-2.5 py-1 text-xs font-bold tracking-wide text-white"><Pause size={12} />PAUSED</span>
+          : <span className="inline-flex items-center gap-1.5 rounded-full bg-red-600 px-2.5 py-1 text-xs font-bold tracking-wide text-white"><span className="h-2 w-2 animate-pulse rounded-full bg-white" />LIVE</span>}
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-semibold uppercase tracking-wide text-brand-600">Live detection</p>
+          <p className="truncate font-semibold text-navy-900">{matchShort(d?.match_name ?? null) ?? 'Match in progress'}</p>
+        </div>
+        {running && <span className="text-xs text-slate-500">{d.events ?? 0} incident{d.events === 1 ? '' : 's'} so far</span>}
+        <DetectorControls compact />
+        <button className={btnSm} onClick={() => box.current?.requestFullscreen?.()}><Maximize size={14} />Full screen</button>
+      </div>
+      <div ref={box} className="bg-navy-950">
+        <img src={frame.src} alt="Live view of the match with the players the detector is tracking" className="mx-auto aspect-video max-h-full w-full object-contain" />
+      </div>
+      <div className="px-5 py-3">
+        {pct !== null && <div className="h-1.5 overflow-hidden rounded-full bg-slate-100"><div className="h-1.5 rounded-full bg-brand-600 transition-all duration-700" style={{ width: `${pct}%` }} /></div>}
+        <p className="mt-1.5 text-xs text-slate-500">{pct !== null ? `${pct}% of the video analysed · ` : ''}Falls appear in the incident list as soon as they are detected.</p>
+      </div>
+    </Card>
+  )
+}
+
+/* ---------- WATCH LIVE (every role) ----------
+ * The detector's picture of the match being analysed, large, with the incidents found so far.
+ * The admin starts / pauses / stops the analysis here - no Python window is opened. */
+export function WatchLive() {
+  const { user } = useAuth()
+  const live = useLiveFeed()
+  const d = useDetector().data
+  const admin = user?.role === 'ADMIN' && !user.dev
+  const [starting, setStarting] = useState(false)
+  const running = !!d && (d.state === 'running' || d.state === 'starting')
+  const launching = d?.state === 'launching'
+  const ev = useEvents(running && d?.match_id ? d.match_id : undefined)
+  const incidents = running && d?.match_id ? [...(ev.data ?? [])].sort((a, b) => (b.videoTimeSec ?? 0) - (a.videoTimeSec ?? 0)) : []
+  const pct = running && d?.frame && d?.total_frames ? Math.min(100, Math.round((100 * d.frame) / d.total_frames)) : null
+
+  return (
+    <>
+      <PageHeader title="Watch live" crumbs={[{ label: 'Watch live' }]} actions={admin && !running && !launching && <button className={btnP} onClick={() => setStarting(true)}><Play size={16} />Start an analysis</button>} />
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px] [&>*]:min-w-0">
+        <div className="space-y-3">
+          {live ? <LivePanel frame={live} />
+            : launching ? (
+              <Card className="grid aspect-video place-items-center bg-navy-950 text-center text-slate-200">
+                <div className="space-y-3 px-6">
+                  <Loader2 className="mx-auto animate-spin text-sky-400" size={36} />
+                  <p className="text-lg font-semibold">Starting the analysis{d?.match_name ? ` of ${d.match_name}` : ''}…</p>
+                  <p className="text-sm text-slate-400">Loading the pose model and the player roster. The live picture appears here in a moment.</p>
+                  <div className="flex justify-center"><DetectorControls compact /></div>
+                </div>
+              </Card>
+            ) : (
+              <Card className="grid aspect-video place-items-center bg-navy-950 text-center text-slate-300">
+                <div className="space-y-3 px-6">
+                  <VideoOff className="mx-auto" size={40} />
+                  <p className="text-lg font-semibold text-white">No match is being analysed right now</p>
+                  <p className="text-sm text-slate-400">{admin ? 'Start an analysis on a match video: the detection plays here for every user, without opening a Python window.' : 'The live detection appears here automatically as soon as the administrator starts an analysis.'}</p>
+                  {admin && <button className={btnP + ' mx-auto'} onClick={() => setStarting(true)}><Play size={16} />Start an analysis</button>}
+                </div>
+              </Card>
+            )}
+          {running && !live && <DetectorControls />}
+        </div>
+        <Card className="!p-0">
+          <div className="border-b border-slate-100 px-5 py-4">
+            <h2 className="font-semibold">Incidents in this match</h2>
+            <p className="text-xs text-slate-500">{running ? `${matchShort(d?.match_name ?? null) ?? 'Current match'}${pct !== null ? ` · ${pct}% analysed` : ''}${d?.paused ? ' · paused' : ''}` : 'Shown while a match is being analysed'}</p>
+          </div>
+          {!running ? <EmptyState title={launching ? 'Starting…' : 'Not live'} text={launching ? 'Falls appear here as soon as they are detected.' : 'Past matches and their clips are under Injury Events.'} action={!launching ? <Link to="/events" className={btnSm}>Injury Events</Link> : undefined} />
+            : incidents.length === 0 ? <EmptyState title="No falls yet" text="Each fall appears here the moment it is detected, with its body area and risk." />
+            : <ul className="max-h-[560px] divide-y divide-slate-100 overflow-y-auto p-2">{incidents.map((e) => <EventLine key={e.id} e={e} />)}</ul>}
+        </Card>
+      </div>
+      {starting && <NewAnalysisModal onClose={() => setStarting(false)} />}
+    </>
+  )
+}
+
 function DashCharts({ list, loading }: { list: InjuryEvent[]; loading: boolean }) {
+  const live = useLiveFeed()
   if (loading) return <div className="mt-5 grid gap-4 xl:grid-cols-12"><Card className="xl:col-span-8"><Skeleton className="aspect-video h-auto w-full" /></Card><Card className="xl:col-span-4"><Skeleton className="h-40 w-full" /></Card></div>
   const risk = [
     { label: 'High', value: list.filter((e) => e.risk === 'HIGH').length, color: STATUS_COLOR.HIGH },
@@ -986,7 +1104,7 @@ function DashCharts({ list, loading }: { list: InjuryEvent[]; loading: boolean }
 
   return (
     <div className="mt-5 grid gap-4 xl:grid-cols-12 [&>*]:min-w-0">
-      <MatchAnalysisPanel list={list} typeColor={typeColor} />
+      {live ? <LivePanel frame={live} className="xl:col-span-8" /> : <MatchAnalysisPanel list={list} typeColor={typeColor} />}
       <div className="grid gap-4 md:grid-cols-2 xl:col-span-4 xl:grid-cols-1">
         <Card>
           <h2 className="font-semibold">Risk overview</h2>
@@ -1133,28 +1251,171 @@ export function Dashboard({ role }: { role: Role }) {
   )
 }
 /* ---------- GENERIC LIST (same layout for every list page) ---------- */
-interface Cfg { title: string; crumb: string; filters: { name: string; opts: string[] }[]; create?: { label: string; fields: { n: string; l: string; opts?: string[] }[] } }
+interface Cfg { title: string; crumb: string; filters: { name: string; opts: string[] }[]; create?: string }
 const CFG: Record<string, Cfg> = {
-  teams: { title: 'Teams', crumb: 'Teams', filters: [{ name: 'Status', opts: ['Active', 'Archived'] }], create: { label: 'Create team', fields: [{ n: 'name', l: 'Team name' }] } },
-  players: { title: 'Players', crumb: 'Players', filters: [{ name: 'Team', opts: [] }, { name: 'Position', opts: ['Goalkeeper', 'Defender', 'Midfielder', 'Forward'] }], create: { label: 'Register player', fields: [{ n: 'name', l: 'Player name' }, { n: 'jersey', l: 'Jersey number' }, { n: 'position', l: 'Position', opts: ['Goalkeeper', 'Defender', 'Midfielder', 'Forward'] }] } },
-  matches: { title: 'Matches', crumb: 'Matches', filters: [{ name: 'Status', opts: ['Scheduled', 'Processing', 'Completed'] }], create: { label: 'Create match', fields: [{ n: 'teamA', l: 'Team A' }, { n: 'teamB', l: 'Team B' }, { n: 'when', l: 'Date and time' }] } },
+  players: { title: 'Players', crumb: 'Players', filters: [{ name: 'Team', opts: [] }], create: 'Register player' },
+  matches: { title: 'Matches', crumb: 'Matches', filters: [], create: 'New analysis' },
   events: { title: 'Events', crumb: 'Events', filters: [{ name: 'Risk', opts: ['LOW', 'MEDIUM', 'HIGH'] }, { name: 'Event type', opts: ['Collision', 'Fall', 'Twist', 'Landing'] }, { name: 'Match', opts: [] }] },
   collisions: { title: 'Collisions', crumb: 'Collisions', filters: [{ name: 'Risk', opts: ['LOW', 'MEDIUM', 'HIGH'] }, { name: 'Match', opts: [] }] },
-  reports: { title: 'Reports', crumb: 'Reports', filters: [{ name: 'Match', opts: [] }] },
-  users: { title: 'User management', crumb: 'Users', filters: [{ name: 'Role', opts: ['ADMIN', 'MEDICAL', 'COACH'] }, { name: 'Status', opts: ['Active', 'Deactivated'] }], create: { label: 'Create user', fields: [{ n: 'name', l: 'Full name' }, { n: 'email', l: 'Email' }, { n: 'role', l: 'Role', opts: ['ADMIN', 'MEDICAL', 'COACH'] }] } },
 }
 
-function FormModal({ cfg, open, onClose }: { cfg: NonNullable<Cfg['create']>; open: boolean; onClose: () => void }) {
+/* ---------- admin: create a team, register / edit a player ---------- */
+function CreateTeamModal({ onClose }: { onClose: () => void }) {
   const toast = useToast()
-  const schema = z.object(Object.fromEntries(cfg.fields.map((f) => [f.n, z.string().trim().min(1, `${f.l} is required`)])))
-  const f = useForm<Record<string, string>>({ resolver: zodResolver(schema) })
+  const refresh = useRefreshAll()
+  const qc = useQueryClient()
+  const [name, setName] = useState('')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const save = async (ev: { preventDefault: () => void }) => {
+    ev.preventDefault()
+    if (!name.trim()) return setErr('Team name is required.')
+    setBusy(true); setErr('')
+    try {
+      await createTeam(name.trim())
+      toast(`Team ${name.trim()} created. Register its players next.`)
+      refresh(); qc.invalidateQueries({ queryKey: ['players'] })
+      onClose()
+    } catch (x) { setErr(normalizeApiError(x)) } finally { setBusy(false) }
+  }
   return (
-    <Modal open={open} title={cfg.label} onClose={onClose}>
-      <form className="space-y-3" noValidate onSubmit={f.handleSubmit(() => { toast(NC, true); onClose() })}>
-        {cfg.fields.map((x) => <Field key={x.n} label={x.l + ' *'} err={f.formState.errors[x.n]?.message as string | undefined}>{x.opts ? <select className={inp} {...f.register(x.n)}><option value="">Select…</option>{x.opts.map((o) => <option key={o}>{o}</option>)}</select> : <input className={inp} {...f.register(x.n)} />}</Field>)}
-        <div className="flex justify-end gap-2 pt-2"><button type="button" className={btnS} onClick={onClose}>Cancel</button><button className={btnP} disabled={f.formState.isSubmitting}>Save</button></div>
+    <Modal open title="Create team" onClose={onClose}>
+      <form className="space-y-3" noValidate onSubmit={save}>
+        <Field label="Team name *"><input className={inp} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Brazil" maxLength={60} /></Field>
+        <p className="text-xs text-slate-500">Shirt colours for jersey reading are set in the detector (player_identifier.py).</p>
+        {err && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-800">{err}</p>}
+        <div className="flex justify-end gap-2 pt-2"><button type="button" className={btnS} onClick={onClose}>Cancel</button><button className={btnP} disabled={busy}>{busy ? 'Saving…' : 'Create team'}</button></div>
       </form>
     </Modal>
+  )
+}
+
+function PlayerModal({ player, defaultTeam, onClose }: { player?: Player; defaultTeam?: number; onClose: () => void }) {
+  const toast = useToast()
+  const refresh = useRefreshAll()
+  const qc = useQueryClient()
+  const teams = useTeams().data ?? []
+  const [name, setName] = useState(player?.name ?? '')
+  const [jersey, setJersey] = useState(player ? String(player.jersey) : '')
+  const [teamId, setTeamId] = useState(String(player?.teamId ?? defaultTeam ?? ''))
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const save = async (ev: { preventDefault: () => void }) => {
+    ev.preventDefault()
+    const n = Number(jersey)
+    if (!name.trim()) return setErr('Player name is required.')
+    if (!Number.isInteger(n) || n < 1 || n > 99) return setErr('Jersey number must be between 1 and 99.')
+    if (!teamId) return setErr('Pick the team.')
+    setBusy(true); setErr('')
+    try {
+      const p = await savePlayer({ id: player?.id, name: name.trim(), jersey: n, teamId: Number(teamId) })
+      toast(player ? `${p.name} updated.` : `${p.name} (#${p.jersey}) registered. The detector uses them from its next run.`)
+      refresh(); qc.invalidateQueries({ queryKey: ['players'] })
+      onClose()
+    } catch (x) { setErr(normalizeApiError(x)) } finally { setBusy(false) }
+  }
+  return (
+    <Modal open title={player ? `Edit player · ${player.name}` : 'Register player'} onClose={onClose}>
+      <form className="space-y-3" noValidate onSubmit={save}>
+        <Field label="Player name *"><input className={inp} value={name} onChange={(e) => setName(e.target.value)} maxLength={80} /></Field>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Jersey number *"><input className={inp} inputMode="numeric" value={jersey} onChange={(e) => setJersey(e.target.value.replace(/\D/g, '').slice(0, 2))} placeholder="1-99" /></Field>
+          <Field label="Team *"><select className={inp} value={teamId} onChange={(e) => setTeamId(e.target.value)}><option value="">Select team…</option>{teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}</select></Field>
+        </div>
+        {err && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-800">{err}</p>}
+        <div className="flex justify-end gap-2 pt-2"><button type="button" className={btnS} onClick={onClose}>Cancel</button><button className={btnP} disabled={busy}>{busy ? 'Saving…' : player ? 'Save changes' : 'Register player'}</button></div>
+      </form>
+    </Modal>
+  )
+}
+
+/* ---------- admin: run the detector on a match video from the website ---------- */
+function NewAnalysisModal({ onClose }: { onClose: () => void }) {
+  const toast = useToast()
+  const nav = useNavigate()
+  const qc = useQueryClient()
+  const videos = useQuery({ queryKey: ['videos'], queryFn: getVideos })
+  const [video, setVideo] = useState('')
+  const [name, setName] = useState('')
+  const [upload, setUpload] = useState<number | null>(null)
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const list = videos.data ?? []
+  const pickFile = async (file?: File) => {
+    if (!file) return
+    setErr(''); setUpload(0)
+    try {
+      await uploadVideo(file, setUpload)
+      await qc.invalidateQueries({ queryKey: ['videos'] })
+      setVideo(file.name)
+      if (!name) setName(file.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' '))
+      toast(`${file.name} uploaded.`)
+    } catch (x) { setErr(normalizeApiError(x)) } finally { setUpload(null) }
+  }
+  const start = async (ev: { preventDefault: () => void }) => {
+    ev.preventDefault()
+    if (!video) return setErr('Pick a video or upload one.')
+    setBusy(true); setErr('')
+    try {
+      await startDetector(video, name.trim())
+      qc.invalidateQueries({ queryKey: ['detector'] })
+      toast('Analysis started. The live picture appears in Watch Live once the model has loaded.')
+      onClose()
+      nav('/live')
+    } catch (x) { setErr(normalizeApiError(x)) } finally { setBusy(false) }
+  }
+  return (
+    <Modal open title="New analysis" onClose={onClose}>
+      <form className="space-y-3" noValidate onSubmit={start}>
+        <Field label="Match video *">
+          {videos.isLoading ? <Skeleton /> : (
+            <select className={inp} value={video} onChange={(e) => setVideo(e.target.value)}>
+              <option value="">{list.length ? 'Select a video…' : 'No videos yet - upload one below'}</option>
+              {list.map((v) => <option key={v.name} value={v.name}>{v.name} ({v.size_mb >= 1024 ? `${(v.size_mb / 1024).toFixed(1)} GB` : `${v.size_mb} MB`})</option>)}
+            </select>
+          )}
+        </Field>
+        <label className={`flex cursor-pointer flex-col items-center gap-2 rounded-xl border-2 border-dashed border-slate-300 p-4 text-sm text-slate-500 hover:border-brand-600/50 ${upload !== null ? 'pointer-events-none opacity-70' : ''}`}>
+          <Upload size={18} />{upload !== null ? `Uploading… ${upload}%` : 'Upload a new video (MP4, MOV, AVI, MKV, WEBM)'}
+          <input type="file" accept="video/*,.mkv" className="sr-only" disabled={upload !== null} onChange={(e) => { pickFile(e.target.files?.[0]); e.target.value = '' }} />
+          {upload !== null && <span className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200"><span className="block h-1.5 rounded-full bg-brand-600 transition-all" style={{ width: `${upload}%` }} /></span>}
+        </label>
+        <Field label="Match name"><input className={inp} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Netherlands vs Portugal" maxLength={120} /></Field>
+        <p className="text-xs text-slate-500">The detector runs on this computer without a window. Everyone sees it live on their dashboard; you can pause or stop it there.</p>
+        {err && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-800">{err}</p>}
+        <div className="flex justify-end gap-2 pt-2"><button type="button" className={btnS} onClick={onClose}>Cancel</button><button className={btnP} disabled={busy || upload !== null}><Play size={16} />{busy ? 'Starting…' : 'Start analysis'}</button></div>
+      </form>
+    </Modal>
+  )
+}
+
+/** Admin: pause / resume / stop the running analysis (plus a force stop when it does not react). */
+export function DetectorControls({ compact = false }: { compact?: boolean }) {
+  const { user } = useAuth()
+  const d = useDetector().data
+  const toast = useToast()
+  const qc = useQueryClient()
+  const [busy, setBusy] = useState(false)
+  const [confirm, setConfirm] = useState<'stop' | 'force' | null>(null)
+  const log = useQuery({ queryKey: ['detectorLog'], queryFn: getDetectorLog, enabled: user?.role === 'ADMIN' && d?.state === 'launching', refetchInterval: 4000 })
+  if (user?.role !== 'ADMIN' || user.dev || !d || !['launching', 'starting', 'running'].includes(d.state)) return null
+  const act = async (a: 'pause' | 'resume' | 'stop' | 'force') => {
+    setBusy(true)
+    try { toast(await controlDetector(a)); qc.invalidateQueries({ queryKey: ['detector'] }) } catch (x) { toast(normalizeApiError(x), true) } finally { setBusy(false) }
+  }
+  const launching = d.state === 'launching'
+  return (
+    <div className={`flex flex-wrap items-center gap-2 ${compact ? '' : 'rounded-xl border border-slate-200 bg-slate-50 p-3'}`}>
+      {launching ? <span className="inline-flex items-center gap-2 text-sm text-slate-600"><Loader2 size={14} className="animate-spin" />Loading the model…</span>
+        : d.stop_requested ? <span className="inline-flex items-center gap-2 text-sm text-amber-700"><Loader2 size={14} className="animate-spin" />Stopping, saving clips and the report…</span>
+        : d.paused ? <button className={btnSm} disabled={busy} onClick={() => act('resume')}><Play size={14} />Resume</button>
+        : <button className={btnSm} disabled={busy} onClick={() => act('pause')}><Pause size={14} />Pause</button>}
+      {!launching && !d.stop_requested && <button className={btnSm + ' !text-red-700'} disabled={busy} onClick={() => setConfirm('stop')}><Square size={14} />Stop</button>}
+      {(launching || d.stop_requested) && <button className={btnSm + ' !text-red-700'} disabled={busy} onClick={() => setConfirm('force')}><Square size={14} />Force stop</button>}
+      {launching && log.data && log.data.length > 0 && <p className="w-full truncate font-mono text-[11px] text-slate-500" title={log.data.slice(-8).join('\n')}>{log.data[log.data.length - 1]}</p>}
+      <Confirm open={confirm === 'stop'} title="Stop the analysis?" text="The detector finishes the current frame, saves the clips and the report, then stops. Falls found so far are kept." confirmLabel="Stop analysis" onConfirm={() => act('stop')} onClose={() => setConfirm(null)} />
+      <Confirm open={confirm === 'force'} title="Force stop?" text="The detector process is closed at once. Clips that are still being written can be lost." confirmLabel="Force stop" onConfirm={() => act('force')} onClose={() => setConfirm(null)} />
+    </div>
   )
 }
 
@@ -1172,46 +1433,41 @@ export function ListPage({ k }: { k: string }) {
 function ListPageInner({ k }: { k: string }) {
   const c = CFG[k]
   const { user } = useAuth()
-  const toast = useToast()
   const [sp, setSp] = useSearchParams()
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(sp.get('new') === '1')
   const [logOpen, setLogOpen] = useState(false)
   const q = sp.get('q') ?? ''
   const fv = (name: string) => sp.get(name.toLowerCase().replace(' ', '_')) ?? ''
   const setF = (name: string, v: string) => { const n = new URLSearchParams(sp); const key = name.toLowerCase().replace(' ', '_'); if (v) n.set(key, v); else n.delete(key); setSp(n, { replace: true }) }
-  const canCreate = !!c.create && user?.role === 'ADMIN'
+  const canCreate = !!c.create && user?.role === 'ADMIN' && !user.dev
   const matches = useMatches().data ?? []
   const players = usePlayers().data ?? []
   const optsFor = (name: string, opts: string[]) => (name === 'Match' ? [...new Set(matches.map((m) => m.name))] : name === 'Team' ? [...new Set(players.map((p) => p.teamName).filter(Boolean))] as string[] : opts)
-  // Position isn't recorded by the backend
-  const disabledFilter = (name: string) => (k === 'players' && name === 'Position') || k === 'reports' || k === 'users' || (k === 'teams' && name === 'Status') || (k === 'matches' && name === 'Status')
   const anyFilter = q || c.filters.some((x) => fv(x.name)) || sp.get('identity')
 
   return (
     <>
       <PageHeader title={c.title} crumbs={[{ label: c.crumb }]} actions={<>
-        {canCreate && <button className={btnP} onClick={() => setOpen(true)}><Plus size={16} />{c.create!.label}</button>}
-        {k === 'reports' && <button className={btnP} onClick={() => toast(NC, true)}><Plus size={16} />Generate report</button>}
+        {canCreate && <button className={btnP} onClick={() => setOpen(true)}>{k === 'matches' ? <Play size={16} /> : <Plus size={16} />}{c.create}</button>}
         {k === 'events' && user?.role === 'MEDICAL' && <button className={btnP} disabled={!!user?.dev} onClick={() => setLogOpen(true)}><ClipboardPlus size={16} />Log manual event</button>}
       </>} />
       <Card className="!p-0">
         <div className="flex flex-wrap gap-2 border-b border-slate-200 p-3">
           <input aria-label={`Search ${c.title}`} className={inp + ' max-w-xs'} placeholder="Search…" value={q} onChange={(e) => setF('q', e.target.value)} />
           {c.filters.map((fl) => (
-            <select key={fl.name} aria-label={fl.name} className={inpAuto} value={fv(fl.name)} disabled={disabledFilter(fl.name)} title={disabledFilter(fl.name) ? 'Not recorded by the backend yet' : undefined} onChange={(e) => setF(fl.name, e.target.value)}>
+            <select key={fl.name} aria-label={fl.name} className={inpAuto} value={fv(fl.name)} onChange={(e) => setF(fl.name, e.target.value)}>
               <option value="">{fl.name}: All</option>{optsFor(fl.name, fl.opts).map((o) => <option key={o} value={o}>{o}</option>)}
             </select>
           ))}
           {(k === 'events' || k === 'collisions') && <select aria-label="Identification" className={inpAuto} value={sp.get('identity') ?? ''} onChange={(e) => setF('identity', e.target.value)}><option value="">Players: All</option><option value="unidentified">Unidentified only</option><option value="identified">Identified only</option></select>}
           {anyFilter && <button className={btnS} onClick={() => setSp({}, { replace: true })}>Clear</button>}
         </div>
-        {k === 'teams' && <TeamsTable q={q} />}
         {k === 'players' && <PlayersTable q={q} team={fv('Team')} />}
-        {k === 'matches' && <MatchesTable q={q} />}
+        {k === 'matches' && <><DetectorBar /><MatchesTable q={q} /></>}
         {(k === 'events' || k === 'collisions') && <EventsList collisions={k === 'collisions'} q={q} risk={fv('Risk')} type={fv('Event type')} match={fv('Match')} identity={sp.get('identity') ?? ''} filtered={!!anyFilter} />}
-        {(k === 'reports' || k === 'users') && <StaticList k={k} onCreate={canCreate ? () => setOpen(true) : undefined} />}
       </Card>
-      {c.create && <FormModal cfg={c.create} open={open} onClose={() => setOpen(false)} />}
+      {canCreate && open && k === 'players' && <PlayerModal onClose={() => setOpen(false)} />}
+      {canCreate && open && k === 'matches' && <NewAnalysisModal onClose={() => setOpen(false)} />}
       {logOpen && <ManualEventModal open onClose={() => setLogOpen(false)} />}
     </>
   )
@@ -1425,13 +1681,18 @@ const OWNER_ROLES: Role[] = ['COACH', 'PLAYER']
 const canRemoveUser = (me: { role: Role; teamId: number | null; name: string } | null, u: AppUser) =>
   !!me && u.username !== me.name && (me.role === 'ADMIN' || (me.role === 'OWNER' && OWNER_ROLES.includes(u.role) && u.teamId === me.teamId))
 
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$/
+// Everyone signs in with Google using their Gmail; an admin login also has a password (emergency login).
 const us = z.object({
-  username: z.string().trim().min(1, 'Username is required').max(50, 'Username must be 50 characters or fewer').regex(/^\S+$/, 'Username cannot contain spaces'),
-  password: z.string().min(6, 'Password must be at least 6 characters').max(72, 'Password must be 72 characters or fewer'),
+  email: z.string().trim().toLowerCase(),
+  password: z.string().max(72, 'Password must be 72 characters or fewer'),
   role: z.string().min(1, 'Pick a role'),
   teamId: z.string(),
   playerId: z.string(),
-}).refine((v) => (v.role !== 'COACH' && v.role !== 'OWNER') || v.teamId !== '', { path: ['teamId'], message: 'Pick the team' })
+}).refine((v) => v.email === '' || EMAIL_RE.test(v.email), { path: ['email'], message: 'Enter a valid Gmail address, e.g. name@gmail.com' })
+  .refine((v) => v.role === 'ADMIN' || v.email !== '', { path: ['email'], message: 'Enter the Gmail this person signs in with' })
+  .refine((v) => v.role !== 'ADMIN' || v.password.length >= 6, { path: ['password'], message: 'Admin logins need a password of at least 6 characters (emergency login)' })
+  .refine((v) => (v.role !== 'COACH' && v.role !== 'OWNER') || v.teamId !== '', { path: ['teamId'], message: 'Pick the team' })
   .refine((v) => v.role !== 'PLAYER' || v.playerId !== '', { path: ['playerId'], message: 'Pick the player this login belongs to' })
 
 function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -1447,7 +1708,7 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
   const freePlayers = allPlayers.filter((p) => !withLogin.has(p.id))
   const [show, setShow] = useState(false)
   const [err, setErr] = useState('')
-  const empty = { username: '', password: '', role: '', teamId: owner && user?.teamId ? String(user.teamId) : '', playerId: '' }
+  const empty = { email: '', password: '', role: '', teamId: owner && user?.teamId ? String(user.teamId) : '', playerId: '' }
   const f = useForm<z.infer<typeof us>>({ resolver: zodResolver(us), defaultValues: empty })
   const role = f.watch('role')
   const playerId = f.watch('playerId')
@@ -1455,8 +1716,9 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
   const submit = f.handleSubmit(async (v) => {
     setErr('')
     try {
-      const u = await createUser({ username: v.username.trim(), password: v.password, role: v.role as Role, teamId: owner ? user?.teamId ?? null : v.teamId ? Number(v.teamId) : null, playerId: v.playerId ? Number(v.playerId) : null })
-      toast(u.role === 'PLAYER' ? `Created ${u.username}: ${u.playerName ?? 'player'}'s dashboard login. They can log in now.` : `Created ${u.username} (${ROLE_LABEL[u.role]}). They can log in now.`)
+      const u = await createUser({ email: v.email, password: v.role === 'ADMIN' ? v.password : undefined, role: v.role as Role, teamId: owner ? user?.teamId ?? null : v.teamId ? Number(v.teamId) : null, playerId: v.playerId ? Number(v.playerId) : null })
+      const who = u.email ?? u.username
+      toast(u.role === 'PLAYER' ? `${who} can now sign in with Google as ${u.playerName ?? 'the player'}.` : `${who} can now sign in with Google as ${ROLE_LABEL[u.role]}.`)
       qc.invalidateQueries({ queryKey: ['users'] })
       qc.invalidateQueries({ queryKey: ['teams'] })
       close()
@@ -1467,10 +1729,7 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
   return (
     <Modal open={open} title="Create user" onClose={close}>
       <form className="space-y-3" noValidate onSubmit={submit}>
-        <Field label="Username *" err={f.formState.errors.username?.message}><input className={inp} autoComplete="off" placeholder="e.g. coach3" {...f.register('username')} /></Field>
-        <Field label="Password *" err={f.formState.errors.password?.message}>
-          <div className="relative"><input className={inp} type={show ? 'text' : 'password'} autoComplete="new-password" placeholder="At least 6 characters" {...f.register('password')} /><button type="button" aria-label={show ? 'Hide password' : 'Show password'} className="absolute right-3 top-2.5 text-slate-500" onClick={() => setShow((s) => !s)}>{show ? <EyeOff size={16} /> : <Eye size={16} />}</button></div>
-        </Field>
+        <Field label={role === 'ADMIN' ? 'Gmail (for Sign in with Google)' : 'Gmail *'} err={f.formState.errors.email?.message}><input className={inp} type="email" autoComplete="off" placeholder="name@gmail.com" {...f.register('email')} /></Field>
         <Field label="Role *" err={f.formState.errors.role?.message}>
           <select className={inp} {...f.register('role')}><option value="">Select…</option>{roleChoices.map((r) => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}</select>
         </Field>
@@ -1486,12 +1745,84 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
             <p className="mt-1 text-xs text-slate-500">The player sees only their own profile, injury history, injury events and report. Players who already have a login are not listed.</p>
           </Field>
         )}
-        <p className="text-xs text-slate-500">Share the username and password with the person. They log in with them right away.</p>
+        {role === 'ADMIN' && (
+          <Field label="Emergency password *" err={f.formState.errors.password?.message}>
+            <div className="relative"><input className={inp} type={show ? 'text' : 'password'} autoComplete="new-password" placeholder="At least 6 characters" {...f.register('password')} /><button type="button" aria-label={show ? 'Hide password' : 'Show password'} className="absolute right-3 top-2.5 text-slate-500" onClick={() => setShow((s) => !s)}>{show ? <EyeOff size={16} /> : <Eye size={16} />}</button></div>
+            <p className="mt-1 text-xs text-slate-500">Used only for "Administrator login" when Google sign-in is unavailable. The username is the Gmail.</p>
+          </Field>
+        )}
+        <p className="text-xs text-slate-500">{role === 'ADMIN' ? 'Admins can sign in with Google (if a Gmail is given) or with the emergency password.' : 'No password needed: the person clicks "Sign in with Google" and picks this Gmail. They get exactly this role.'}</p>
         {err && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-800">{err}</p>}
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" className={btnS} onClick={close}>Cancel</button>
           <button className={btnP} disabled={f.formState.isSubmitting}>{f.formState.isSubmitting ? 'Creating…' : 'Create user'}</button>
         </div>
+      </form>
+    </Modal>
+  )
+}
+
+/** Assign / change the Gmail a login signs in with ("Sign in with Google"). */
+function SetEmailModal({ user: target, onClose }: { user: AppUser; onClose: () => void }) {
+  const toast = useToast()
+  const qc = useQueryClient()
+  const [email, setEmail] = useState(target.email ?? '')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const save = async (ev: { preventDefault: () => void }) => {
+    ev.preventDefault()
+    const v = email.trim().toLowerCase()
+    if (v && !EMAIL_RE.test(v)) return setErr('Enter a valid Gmail address, e.g. name@gmail.com')
+    if (!v && target.role !== 'ADMIN') return setErr('Enter the Gmail this person signs in with.')
+    setBusy(true); setErr('')
+    try {
+      await setUserEmail(target.id, v || null)
+      qc.invalidateQueries({ queryKey: ['users'] })
+      toast(v ? `${v} now signs in as ${ROLE_LABEL[target.role]}.` : `Google sign-in removed from ${target.username}.`)
+      onClose()
+    } catch (x) { setErr(normalizeApiError(x)) } finally { setBusy(false) }
+  }
+  return (
+    <Modal open title={`Gmail · ${target.email ?? target.username}`} onClose={onClose}>
+      <form className="space-y-3" noValidate onSubmit={save}>
+        <Field label={target.role === 'ADMIN' ? 'Gmail (leave empty for password login only)' : 'Gmail *'}><input className={inp} type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@gmail.com" /></Field>
+        <p className="text-xs text-slate-500">This person clicks "Sign in with Google", picks this Gmail and gets the role <b>{ROLE_LABEL[target.role]}</b>{target.teamName ? ` (${target.teamName})` : ''}.</p>
+        {err && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-800">{err}</p>}
+        <div className="flex justify-end gap-2 pt-2"><button type="button" className={btnS} onClick={onClose}>Cancel</button><button className={btnP} disabled={busy}>{busy ? 'Saving…' : 'Save Gmail'}</button></div>
+      </form>
+    </Modal>
+  )
+}
+
+/** "Forgot password": the admin (any login) or a team owner (own coach / player logins) sets a new password. */
+function ResetPasswordModal({ user: target, onClose }: { user: AppUser; onClose: () => void }) {
+  const toast = useToast()
+  const [pw, setPw] = useState('')
+  const [again, setAgain] = useState('')
+  const [show, setShow] = useState(false)
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const save = async (ev: { preventDefault: () => void }) => {
+    ev.preventDefault()
+    setErr('')
+    if (pw.length < 6) return setErr('Password must be at least 6 characters.')
+    if (pw !== again) return setErr('The two passwords do not match.')
+    setBusy(true)
+    try {
+      await resetUserPassword(target.id, pw)
+      toast(`New password set for ${target.username}. Share it with them; they can change it after logging in.`)
+      onClose()
+    } catch (x) { setErr(normalizeApiError(x)) } finally { setBusy(false) }
+  }
+  return (
+    <Modal open title={`Reset password · ${target.username}`} onClose={onClose}>
+      <form className="space-y-3" noValidate onSubmit={save}>
+        <Field label="New password *">
+          <div className="relative"><input className={inp} type={show ? 'text' : 'password'} autoComplete="new-password" placeholder="At least 6 characters" value={pw} onChange={(e) => setPw(e.target.value)} /><button type="button" aria-label={show ? 'Hide password' : 'Show password'} className="absolute right-3 top-2.5 text-slate-500" onClick={() => setShow((s) => !s)}>{show ? <EyeOff size={16} /> : <Eye size={16} />}</button></div>
+        </Field>
+        <Field label="Repeat the new password *"><input className={inp} type={show ? 'text' : 'password'} autoComplete="new-password" value={again} onChange={(e) => setAgain(e.target.value)} /></Field>
+        {err && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-800">{err}</p>}
+        <div className="flex justify-end gap-2 pt-2"><button type="button" className={btnS} onClick={onClose}>Cancel</button><button className={btnP} disabled={busy}>{busy ? 'Saving…' : 'Set new password'}</button></div>
       </form>
     </Modal>
   )
@@ -1507,11 +1838,13 @@ function UsersPage() {
   const [roleF, setRoleF] = useState('')
   const [open, setOpen] = useState(false)
   const [del, setDel] = useState<AppUser | null>(null)
+  const [resetFor, setResetFor] = useState<AppUser | null>(null)
+  const [emailFor, setEmailFor] = useState<AppUser | null>(null)
   const owner = user?.role === 'OWNER'
 
   const needle = search.trim().toLowerCase()
   const rows = (q.data ?? [])
-    .filter((u) => (!roleF || u.role === roleF) && (!needle || `${u.username} ${u.teamName ?? ''}`.toLowerCase().includes(needle)))
+    .filter((u) => (!roleF || u.role === roleF) && (!needle || `${u.username} ${u.email ?? ''} ${u.teamName ?? ''}`.toLowerCase().includes(needle)))
   const isMe = (u: AppUser) => !!user && u.username === user.name
 
   const remove = async () => {
@@ -1532,22 +1865,32 @@ function UsersPage() {
       {owner && <p className="-mt-2 mb-3 text-sm text-slate-500">Your team's logins and the medical staff. You can add and remove coach and player logins of your team; medical staff accounts are managed by the admin.</p>}
       <Card className="!p-0">
         <div className="flex flex-wrap gap-2 border-b border-slate-200 p-3">
-          <input aria-label="Search users" className={inp + ' max-w-xs'} placeholder="Search username or team…" value={search} onChange={(e) => setSearch(e.target.value)} />
+          <input aria-label="Search users" className={inp + ' max-w-xs'} placeholder="Search Gmail, login or team…" value={search} onChange={(e) => setSearch(e.target.value)} />
           <select aria-label="Role" className={inpAuto} value={roleF} onChange={(e) => setRoleF(e.target.value)}><option value="">Role: All</option>{(owner ? ['OWNER', 'COACH', 'PLAYER', 'MEDICAL'] as Role[] : ROLES).map((r) => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}</select>
           {(search || roleF) && <button className={btnS} onClick={() => { setSearch(''); setRoleF('') }}>Clear</button>}
         </div>
         <div className="overflow-x-auto"><table className="w-full text-left text-sm">
-          <thead className="bg-slate-50 text-xs uppercase text-slate-500"><tr>{['Username', 'Role', 'Team / player', 'Actions'].map((h) => <th key={h} className={th + (h === 'Actions' ? ' text-right' : '')}>{h}</th>)}</tr></thead>
+          <thead className="bg-slate-50 text-xs uppercase text-slate-500"><tr>{['Gmail (Sign in with Google)', 'Role', 'Team / player', 'Actions'].map((h) => <th key={h} className={th + (h === 'Actions' ? ' text-right' : '')}>{h}</th>)}</tr></thead>
           <tbody>
             {q.isLoading && [0, 1, 2].map((i) => <tr key={i}><td colSpan={4} className="px-4 py-3"><Skeleton /></td></tr>)}
-            {rows.map((u) => (
+            {rows.map((u) => {
+              const canManage = canRemoveUser(user ?? null, u) || (isMe(u) && user?.role === 'ADMIN')
+              return (
               <tr key={u.id} className="border-t hover:bg-slate-50">
-                <td className="px-4 py-3"><span className="font-medium">{u.username}</span>{isMe(u) && <span className="ml-2"><Badge tone="gray">You</Badge></span>}</td>
+                <td className="px-4 py-3">
+                  {u.email ? <span className="font-medium">{u.email}</span> : <span className="text-amber-700">No Gmail · password login only</span>}
+                  {isMe(u) && <span className="ml-2"><Badge tone="gray">You</Badge></span>}
+                  {u.email !== u.username && <p className="text-xs text-slate-500">login: {u.username}</p>}
+                </td>
                 <td className="px-4 py-3"><Badge tone={ROLE_TONE[u.role]}>{ROLE_LABEL[u.role]}</Badge></td>
                 <td className="px-4 py-3 text-slate-600">{u.role === 'PLAYER' ? <>{u.playerName ?? '—'}{u.jersey !== null && ` #${u.jersey}`}{u.teamName && <span className="text-slate-400"> · {u.teamName}</span>}</> : u.role === 'COACH' || u.role === 'OWNER' ? (u.teamName ?? '—') : <span className="text-slate-400">All teams</span>}</td>
-                <td className="px-4 py-3 text-right">{canRemoveUser(user ?? null, u) ? <button className={btnSm + ' !text-red-700'} onClick={() => setDel(u)}><Trash2 size={14} />Delete</button> : !isMe(u) && owner && <span className="text-xs text-slate-400">Admin only</span>}</td>
+                <td className="px-4 py-3 text-right">{canManage ? <span className="inline-flex flex-wrap justify-end gap-1">
+                  <button className={btnSm} onClick={() => setEmailFor(u)}><Mail size={14} />{u.email ? 'Change Gmail' : 'Set Gmail'}</button>
+                  {u.role === 'ADMIN' && <button className={btnSm} onClick={() => setResetFor(u)}><KeyRound size={14} />Emergency password</button>}
+                  {!isMe(u) && <button className={btnSm + ' !text-red-700'} onClick={() => setDel(u)}><Trash2 size={14} />Delete</button>}
+                </span> : owner && <span className="text-xs text-slate-400">Admin only</span>}</td>
               </tr>
-            ))}
+            )})}
           </tbody>
         </table></div>
         {q.isError && <ErrorState title="Unable to load users" text={normalizeApiError(q.error)} onRetry={() => q.refetch()} />}
@@ -1555,6 +1898,8 @@ function UsersPage() {
         <Pager count={rows.length} />
       </Card>
       <CreateUserModal open={open} onClose={() => setOpen(false)} />
+      {resetFor && <ResetPasswordModal user={resetFor} onClose={() => setResetFor(null)} />}
+      {emailFor && <SetEmailModal user={emailFor} onClose={() => setEmailFor(null)} />}
       <Confirm open={!!del} title={`Delete ${del?.username ?? 'user'}?`} text="They will no longer be able to log in. Events and players are not affected." confirmLabel="Delete user" onConfirm={remove} onClose={() => setDel(null)} />
     </>
   )
@@ -1681,47 +2026,23 @@ function TeamsHub() {
           </Card>
         </>
       )}
-            {admin && <FormModal cfg={CFG.teams.create!} open={createTeam} onClose={() => setCreateTeam(false)} />}
-      {admin && <FormModal cfg={CFG.players.create!} open={registerPlayer} onClose={() => setRegisterPlayer(false)} />}
+      {admin && createTeam && <CreateTeamModal onClose={() => setCreateTeam(false)} />}
+      {admin && registerPlayer && <PlayerModal defaultTeam={team?.id} onClose={() => setRegisterPlayer(false)} />}
     </>
   )
 }
-/** Reports and users: the backend has no data for these, so the design's empty table is shown. */
-function StaticList({ k, onCreate }: { k: string; onCreate?: () => void }) {
-  const cols = k === 'reports' ? ['Report', 'Event', 'Generated', 'Version', 'Actions'] : ['Name', 'Role', 'Team', 'Status']
-  const c = CFG[k]
+/** Matches page: the analysis that is running right now (everyone), with the controls (admin). */
+function DetectorBar() {
+  const { user } = useAuth()
+  const d = useDetector().data
+  if (!user || !d || !['launching', 'starting', 'running'].includes(d.state)) return null
   return (
-    <>
-      <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="sticky top-0 bg-slate-50 text-xs uppercase text-slate-500"><tr>{cols.map((h) => <th key={h} className={th}>{h}</th>)}</tr></thead><tbody /></table></div>
-      <EmptyState title={`No ${c.title.toLowerCase()} found`} text={k === 'reports' ? 'Report generation is not available in the backend yet.' : 'User management is not available in the backend yet. Accounts are created on the server.'} action={onCreate ? <button className={btnP} onClick={onCreate}>{c.create!.label}</button> : undefined} />
-      <Pager count={0} />
-    </>
-  )
-}
-function TeamsTable({ q }: { q: string }) {
-  const t = useTeams()
-  const rows = (t.data ?? []).filter((x) => !q || `${x.name} ${x.coaches.join(' ')}`.toLowerCase().includes(q.toLowerCase()))
-  return (
-    <>
-      <div className="overflow-x-auto"><table className="w-full text-left text-sm">
-        <thead className="sticky top-0 bg-slate-50 text-xs uppercase text-slate-500"><tr>{['Team', 'Players', 'Active matches', 'Recent incidents', 'Status'].map((h) => <th key={h} className={th}>{h}</th>)}</tr></thead>
-        <tbody>
-          {t.isLoading && [0, 1].map((i) => <tr key={i}><td colSpan={5} className="px-4 py-3"><Skeleton /></td></tr>)}
-          {rows.map((x) => (
-            <tr key={x.id} className="border-t hover:bg-slate-50">
-              <td className="px-4 py-3"><div className="flex items-center gap-2"><span className="font-medium">{x.name}</span><Link className={btnSm} to={`/teams/${x.id}`}>Open</Link></div><p className="text-xs text-slate-500">Coach: {x.coaches.join(', ') || '—'}</p></td>
-              <td className="px-4 py-3">{x.playerCount}</td>
-              <td className="px-4 py-3">—</td>
-              <td className="px-4 py-3">{x.injuryEvents}{x.highRiskEvents > 0 && <span className="ml-2"><Badge tone="red">{x.highRiskEvents} high</Badge></span>}</td>
-              <td className="px-4 py-3"><Badge tone="green">Active</Badge></td>
-            </tr>
-          ))}
-        </tbody>
-      </table></div>
-      {t.isError && <ErrorState title="Unable to load teams" text={normalizeApiError(t.error)} onRetry={() => t.refetch()} />}
-      {!t.isLoading && !t.isError && rows.length === 0 && <EmptyState title="No teams found" text="No records match your filters." />}
-      <Pager count={rows.length} />
-    </>
+    <div className="flex flex-wrap items-center gap-3 border-b border-slate-200 bg-sky-50/60 px-4 py-3 text-sm">
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-red-600 px-2 py-0.5 text-[11px] font-bold text-white"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-white" />{d.paused ? 'PAUSED' : 'LIVE'}</span>
+      <span className="min-w-0 flex-1 truncate">Analysing <b>{matchShort(d.match_name ?? null) ?? d.video ?? 'a match'}</b>{d.state === 'launching' ? ' (starting…)' : d.total_frames && d.frame ? ` · ${Math.min(100, Math.round((100 * d.frame) / d.total_frames))}%` : ''}</span>
+      <Link to="/live" className={btnSm}><Video size={14} />Watch live</Link>
+      <DetectorControls compact />
+    </div>
   )
 }
 
@@ -1764,7 +2085,7 @@ function MatchesTable({ q }: { q: string }) {
   const m = useMatches()
   const ev = useEvents()
   const { user } = useAuth()
-  const staff = !!user && user.role !== 'ADMIN' && !user.dev
+  const staff = !!user && !user.dev
   const count = (id: number) => (ev.data ?? []).filter((e) => e.matchId === id).length
   const rows = (m.data ?? []).filter((x) => !q || `${x.name} ${x.videoSource}`.toLowerCase().includes(q.toLowerCase()))
   return (
@@ -1861,9 +2182,8 @@ function EventsList({ collisions, q, risk, type, match, identity, filtered }: { 
 export function Detail({ k }: { k: 'teams' | 'players' | 'reports' }) {
   const { id } = useParams()
   const { user } = useAuth()
-  const toast = useToast()
   const [tab, setTab] = useState(k === 'teams' ? 'Roster' : k === 'players' ? 'Incidents' : 'Preview')
-  const [deact, setDeact] = useState(false)
+  const [editing, setEditing] = useState(false)
   const [openP, setOpenP] = useState<number | null>(null)
   const teams = useTeams()
   const players = usePlayers()
@@ -1885,17 +2205,15 @@ export function Detail({ k }: { k: 'teams' | 'players' | 'reports' }) {
   return (
     <>
       <PageHeader title={name} crumbs={[{ label, to: listPath }, { label: team?.name ?? player?.name ?? `#${id}` }]} actions={<>
-        {k === 'players' && user?.role === 'ADMIN' && <button className={btnS} onClick={() => setDeact(true)}>Deactivate</button>}
-        {k === 'reports' && <><button className={btnS} onClick={() => toast('Report unavailable: report generation is not in the backend yet.', true)}><Download size={16} />Download</button><button className={btnS} onClick={() => toast(NC, true)}><RefreshCw size={16} />Regenerate</button></>}
+        {k === 'players' && player && user?.role === 'ADMIN' && !user.dev && <button className={btnS} onClick={() => setEditing(true)}><Pencil size={16} />Edit player</button>}
       </>} />
       <div role="tablist" className={`mb-4 flex gap-1 overflow-x-auto border-b ${!found && !loading && k !== 'reports' ? 'hidden' : ''}`}>{tabs.map((t) => <button key={t} role="tab" aria-selected={tab === t} onClick={() => setTab(t)} className={`px-4 py-2 text-sm ${tab === t ? 'border-b-2 border-[#0b1f3a] font-semibold' : 'text-slate-500'}`}>{t}</button>)}</div>
       <Card className={tab === 'Roster' || tab === 'Incidents' ? '!p-0 overflow-hidden' : ''}>
         {!found && !loading && k !== 'reports' ? (
           <EmptyState title="Details not available" text={own ? "This page belongs to another team. You can only open your own team and players." : 'This record could not be found, or you do not have access to it.'} action={<Link to={listPath} className={btnS}>Back to {label}</Link>} />
-        ) : tab === 'Reference photos' && user?.role !== 'ADMIN' && !user?.dev ? (
-          loading ? <div className="space-y-2"><Skeleton /><Skeleton /></div> : player ? <PlayerPhotos playerId={player.id} name={player.name} /> : <EmptyState title="Details not available" text="This record could not be found, or you do not have access to it." />
         ) : tab === 'Reference photos' ? (
-          <div className="space-y-3"><p className="text-sm text-slate-600">Front, back (jersey number) and optional side photos are used for identity matching. Today the detector reads photos from the <code>known_players</code> folder and learns faces automatically.</p><div className="flex flex-wrap gap-2"><label className={btnS + ' cursor-pointer'}><Upload size={16} />Upload photos<input type="file" accept="image/*" multiple className="sr-only" onChange={() => toast(NC, true)} /></label><button className={btnS} onClick={() => toast('Face embedding is done by the detector, not from the dashboard.', true)}><Cpu size={16} />Generate face embedding</button></div></div>
+          user?.dev ? <EmptyState title="No data in preview" text="Log in with a real account to manage reference photos." />
+            : loading ? <div className="space-y-2"><Skeleton /><Skeleton /></div> : player ? <PlayerPhotos playerId={player.id} name={player.name} /> : <EmptyState title="Details not available" text="This record could not be found, or you do not have access to it." />
         ) : loading ? <div className="space-y-2"><Skeleton /><Skeleton /></div>
           : !found ? <EmptyState title="Details not available" text={k === 'reports' ? 'Report generation is not available in the backend yet.' : 'This record could not be found, or you do not have access to it.'} />
           : k === 'teams' && team ? (
@@ -1925,7 +2243,7 @@ export function Detail({ k }: { k: 'teams' | 'players' | 'reports' }) {
             : <PlayerHistory playerId={player.id} name={player.name} />
           ) : null}
       </Card>
-      <Confirm open={deact} title="Deactivate player?" text="The player is removed from active roster use. Historical incidents are kept." confirmLabel="Deactivate" onConfirm={() => toast(NC, true)} onClose={() => setDeact(false)} />
+      {editing && player && <PlayerModal player={player} onClose={() => setEditing(false)} />}
     </>
   )
 }
@@ -1933,41 +2251,31 @@ export function Detail({ k }: { k: 'teams' | 'players' | 'reports' }) {
 /* ---------- MATCH ---------- */
 export function MatchDetail() {
   const { id } = useParams()
-  const toast = useToast()
   const { user } = useAuth()
-  const [file, setFile] = useState<File | null>(null)
-  const [stop, setStop] = useState(false)
-  const admin = user?.role === 'ADMIN'
+  const admin = user?.role === 'ADMIN' && !user.dev
   const m = (useMatches().data ?? []).find((x) => String(x.id) === id)
   const ev = useEvents(Number(id))
+  const d = useDetector().data
   const list = ev.data ?? []
   const teams = (m?.name ?? '').split(/\s+vs\.?\s+/i)
+  const thisRunning = !!d && d.match_id === Number(id) && (d.state === 'running' || d.state === 'starting')
   return (
     <>
-      <PageHeader title={m?.name ?? `Match #${id}`} crumbs={[{ label: 'Matches', to: '/matches' }, { label: m?.name ?? `#${id}` }]} actions={<Link className={btnP} to={`/matches/${id}/monitor`}>Open monitor</Link>} />
+      <PageHeader title={m?.name ?? `Match #${id}`} crumbs={[{ label: 'Matches', to: '/matches' }, { label: m?.name ?? `#${id}` }]} actions={<>
+        {admin && <Link className={btnS} to="/matches?new=1"><Play size={16} />New analysis</Link>}
+        <Link className={btnP} to={`/matches/${id}/monitor`}>Open monitor</Link>
+      </>} />
       <Card className="mb-4 text-center">
-        <div className="flex items-center justify-center gap-6 text-xl font-bold"><span>{teams.length === 2 ? teams[0] : m?.name ?? 'Team A'}</span>{teams.length === 2 && <><span className="text-slate-400">vs</span><span>{teams[1]}</span></>}</div>
-        <p className="mt-1 text-sm text-slate-500">Date / time: {fmtDate(m?.date ?? null)} · {!admin && !user?.dev ? <MatchStatusBadge matchId={Number(id)} known={!!m} /> : m ? <Badge tone="green">Completed</Badge> : <Badge>Status unknown</Badge>}</p>
+        <div className="flex items-center justify-center gap-6 text-xl font-bold"><span>{teams.length === 2 ? teams[0] : m?.name ?? 'Match'}</span>{teams.length === 2 && <><span className="text-slate-400">vs</span><span>{teams[1]}</span></>}</div>
+        <p className="mt-1 text-sm text-slate-500">Analysed: {fmtDate(m?.date ?? null)} · {user?.dev ? <Badge>Status unknown</Badge> : <MatchStatusBadge matchId={Number(id)} known={!!m} />}</p>
         {m?.videoSource && <p className="mt-1 text-xs text-slate-500" title={m.videoSource}>Video: {fileName(m.videoSource)}</p>}
       </Card>
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Card>
-          <h2 className="font-semibold">Match video</h2>
-          {admin ? <label className="mt-3 flex cursor-pointer flex-col items-center gap-2 rounded-xl border-2 border-dashed border-slate-300 p-6 text-sm text-slate-500"><Upload />{file ? file.name : 'Choose a video file (MP4, MOV)'}<input type="file" accept="video/*" className="sr-only" onChange={(e) => setFile(e.target.files?.[0] ?? null)} /></label> : <p className="mt-2 text-sm text-slate-500">Only administrators can upload video.</p>}
-          {file && <div className="mt-3"><div className="h-2 rounded bg-slate-200"><div className="h-2 w-0 rounded bg-sky-500" /></div><p className="mt-1 text-xs text-slate-500">0% · video upload is not in the backend yet; run the detector on the video instead.</p><button className={btnP + ' mt-2'} onClick={() => toast(NC, true)}>Upload</button></div>}
-        </Card>
-        {!admin && !user?.dev && <MatchProgress matchId={Number(id)} events={list.length} known={!!m} />}
-        {(admin || user?.dev) && <Card>
-          <h2 className="font-semibold">AI processing</h2>
-          <p className="mt-2 text-sm">Status: {m ? <Badge tone="green">Completed · {list.length} event(s)</Badge> : <Badge>Not reported</Badge>}</p>
-          {admin && <div className="mt-3 flex flex-wrap gap-2"><button className={btnP} onClick={() => toast(NC, true)}><Play size={16} />Start analysis</button><button className={btnS} onClick={() => toast(NC, true)}><Pause size={16} />Pause</button><button className={btnS} onClick={() => toast(NC, true)}>Resume</button><button className={btnS} onClick={() => setStop(true)}><Square size={16} />Stop</button></div>}
-        </Card>}
-      </div>
+      {!user?.dev && <MatchProgress matchId={Number(id)} events={list.length} known={!!m} />}
+      {thisRunning && <div className="mt-3"><DetectorControls /></div>}
       <Card className="mt-4 !p-0">
         <h2 className="border-b p-4 font-semibold">Detected events</h2>
         {ev.isLoading ? <div className="space-y-2 p-4"><Skeleton /><Skeleton /></div> : list.length === 0 ? <EmptyState title="No events yet" text="Events detected in this match appear here." /> : <ul className="divide-y divide-slate-100 p-2">{list.map((e) => <EventLine key={e.id} e={e} />)}</ul>}
       </Card>
-      <Confirm open={stop} title="Stop analysis?" text="Stopping ends the current processing job. Detected events so far are kept." confirmLabel="Stop analysis" onConfirm={() => toast(NC, true)} onClose={() => setStop(false)} />
     </>
   )
 }
@@ -1975,26 +2283,27 @@ export function MatchDetail() {
 export function Monitor() {
   const { id } = useParams()
   const { user } = useAuth()
-  const staff = !!user && user.role !== 'ADMIN' && !user.dev
-  const [t, setT] = useState({ players: true, pose: false, ids: true })
+  const live = useLiveFeed()
   const m = (useMatches().data ?? []).find((x) => String(x.id) === id)
   const ev = useEvents(Number(id))
   const list = (ev.data ?? []).filter((e) => e.videoTimeSec !== null).sort((a, b) => (a.videoTimeSec ?? 0) - (b.videoTimeSec ?? 0))
   const maxT = Math.max(1, ...list.map((e) => e.videoTimeSec ?? 0))
-  const tog = (k: keyof typeof t) => <label key={k} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={t[k]} onChange={() => setT((s) => ({ ...s, [k]: !s[k] }))} />{{ players: 'Player overlay', pose: 'Pose overlay', ids: 'Track IDs' }[k]}</label>
   return (
     <>
-      <PageHeader title={`Match monitor${m ? ` — ${m.name}` : ` #${id}`}`} crumbs={[{ label: 'Matches', to: '/matches' }, { label: m?.name ?? `#${id}`, to: `/matches/${id}` }, { label: 'Monitor' }]} actions={staff ? <MatchStatusBadge matchId={Number(id)} known={!!m} /> : <Badge>{m ? 'Processing: completed' : 'Processing: not reported'}</Badge>} />
+      <PageHeader title={`Match monitor${m ? ` — ${matchShort(m.name)}` : ` #${id}`}`} crumbs={[{ label: 'Matches', to: '/matches' }, { label: matchShort(m?.name ?? null) ?? `#${id}`, to: `/matches/${id}` }, { label: 'Monitor' }]} actions={user?.dev ? undefined : <MatchStatusBadge matchId={Number(id)} known={!!m} />} />
       <div className="grid gap-4 xl:grid-cols-[1fr_320px]">
         <div className="space-y-3">
-          <div className="relative grid aspect-video place-items-center rounded-2xl bg-slate-900 text-slate-300"><div className="text-center"><VideoOff className="mx-auto" size={36} /><p className="mt-2 font-semibold">Video unavailable</p><p className="text-sm text-slate-400">The full processed video is not stored. Open an event to watch its clip.</p></div></div>
+          {live ? <LivePanel frame={live} /> : (
+            <div className="relative grid aspect-video place-items-center rounded-2xl bg-slate-900 text-slate-300"><div className="text-center"><VideoOff className="mx-auto" size={36} /><p className="mt-2 font-semibold">Not live right now</p><p className="text-sm text-slate-400">The live view appears here while the detector analyses a match. Open an event to watch its clip.</p></div></div>
+          )}
+          <DetectorControls />
           <Card className="space-y-3">
-            <input type="range" aria-label="Seek" disabled className="w-full" />
-            <div className="relative h-3 rounded bg-slate-200" aria-label={`Event timeline (${list.length} events)`}>
-              {list.map((e) => <Link key={e.id} to={`/events/${e.id}`} title={`${e.eventType} at ${fmtVideo(e.videoTimeSec)}`} className={`absolute top-0 h-3 w-1.5 -translate-x-1/2 rounded ${e.risk === 'HIGH' ? 'bg-red-600' : e.risk === 'MEDIUM' ? 'bg-amber-500' : 'bg-green-600'}`} style={{ left: `${((e.videoTimeSec ?? 0) / maxT) * 100}%` }} />)}
+            <div className="flex items-center justify-between"><h2 className="font-semibold">Incident timeline</h2><span className="text-xs text-slate-500">{list.length} incident{list.length === 1 ? '' : 's'} · click a marker to open it</span></div>
+            <div className="relative h-4 rounded-full bg-slate-100" aria-label={`Incident timeline (${list.length} incidents)`}>
+              {list.map((e) => <Link key={e.id} to={`/events/${e.id}`} title={`${e.eventType} · ${e.region ?? ''} · ${fmtVideo(e.videoTimeSec)}`} aria-label={`${e.eventType} at ${fmtVideo(e.videoTimeSec)}`} className={`absolute top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow ${e.risk === 'HIGH' ? 'bg-red-600' : e.risk === 'MEDIUM' ? 'bg-amber-500' : 'bg-green-600'}`} style={{ left: `${((e.videoTimeSec ?? 0) / maxT) * 100}%` }} />)}
             </div>
-            <div className="flex flex-wrap items-center gap-2"><button className={btnS} disabled aria-label="Play"><Play size={16} /></button><button className={btnS} disabled aria-label="Pause"><Pause size={16} /></button><button className={btnS} disabled aria-label="Replay"><RotateCcw size={16} /></button><button className={btnS} disabled aria-label="Fullscreen"><Maximize size={16} /></button><div className="ml-auto flex flex-wrap gap-4">{(['players', 'pose', 'ids'] as const).map(tog)}</div></div>
-            <p className="text-xs text-slate-500">Overlays require per-frame detection data from the backend. Markers on the timeline open each event.</p>
+            <div className="flex justify-between text-xs text-slate-400"><span>0:00:00</span><span>{fmtVideo(maxT)}</span></div>
+            <div className="flex flex-wrap gap-4 text-xs text-slate-500">{(['HIGH', 'MEDIUM', 'LOW'] as const).map((r) => <span key={r} className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full" style={{ background: STATUS_COLOR[r] }} />{r[0] + r.slice(1).toLowerCase()} risk</span>)}</div>
           </Card>
         </div>
         <Card>
@@ -2007,17 +2316,10 @@ export function Monitor() {
 }
 
 /* ---------- EVENT / COLLISION DETAIL ---------- */
-/**
- * Hackathon demo setting: when Gemini's confidence is missing or below 80%, show a value between 80% and 85%
- * (fixed per event) marked "demo". Hover it to see the real value. Set to false to always show the real value.
- */
-const DEMO_CONFIDENCE = true
-
+/** The AI check's real confidence, or a plain "Not checked yet" (never an invented number). */
 function ModelConfidence({ e }: { e: InjuryEvent }) {
   const real = e.gemini.confidence !== null ? Math.round(e.gemini.confidence * 100) : null
-  if (!DEMO_CONFIDENCE || (real !== null && real >= 80)) return <Na v={real !== null ? `${real}%` : null} />
-  const shown = 80 + (e.id % 6)
-  return <span title={`Real value: ${real !== null ? `${real}%` : 'not checked yet'}. Shown as 80-85% for the demo.`}>{shown}% <span className="ml-1 rounded bg-slate-100 px-1 text-[10px] font-semibold uppercase text-slate-500">demo</span></span>
+  return real !== null ? <>{real}%</> : <span className="text-slate-500">Not checked yet</span>
 }
 
 const Row = ({ label, children }: { label: string; children: ReactNode }) => <div className="flex justify-between gap-4"><dt>{label}</dt><dd className="text-right">{children}</dd></div>
@@ -2035,7 +2337,7 @@ export function EventDetail({ collision = false }: { collision?: boolean }) {
   const isPlayer = user?.role === 'PLAYER'
   const crumbs = [{ label: collision ? 'Collisions' : isPlayer ? 'My injury events' : 'Events', to: collision ? '/collisions' : isPlayer ? '/player/events' : '/events' }, { label: `#${id}` }]
   const title = `${collision ? 'Collision' : 'Incident'} #${id}`
-  const staff = !!user && user.role !== 'ADMIN' && !user.dev
+  const staff = !!user && !user.dev
   const assessment = useQuery({ queryKey: ['assessment', id], queryFn: () => getAssessment(Number(id)), enabled: staff && !!fromList })
   const markRead = useMarkRead()
   useEffect(() => { if (staff && fromList) markRead([fromList.id]) }, [staff, fromList?.id]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -2106,7 +2408,7 @@ export function EventDetail({ collision = false }: { collision?: boolean }) {
         <div className="mt-4 grid gap-4 xl:grid-cols-12 [&>*]:min-w-0">
           <Card className="xl:col-span-6">
             {e.clipUrl ? (
-              <><video key={e.id} src={e.clipUrl} controls autoPlay muted playsInline className="w-full rounded-xl bg-black" /><div className="mt-3 flex flex-wrap gap-2"><a href={e.clipUrl} download className={btnS}><Download size={16} />Download clip</a>{user?.role === 'MEDICAL' && <Link className={btnP} to={`/events/${id}/assessment`}><ClipboardPlus size={16} />Add to medical review</Link>}{e.player.playerId !== null && !isPlayer && <Link to={`/players/${e.player.playerId}`} className={btnS}><History size={16} />Player history</Link>}</div></>
+              <><video key={e.id} src={e.clipUrl} poster={e.thumbUrl ?? undefined} controls autoPlay muted playsInline className="w-full rounded-xl bg-black" /><div className="mt-3 flex flex-wrap gap-2"><a href={e.clipUrl} download className={btnS}><Download size={16} />Download clip</a>{user?.role === 'MEDICAL' && <Link className={btnP} to={`/events/${id}/assessment`}><ClipboardPlus size={16} />Add to medical review</Link>}{e.player.playerId !== null && !isPlayer && <Link to={`/players/${e.player.playerId}`} className={btnS}><History size={16} />Player history</Link>}</div></>
             ) : <div className="grid grid-cols-3 gap-2">{['Before', 'Contact', 'After'].map((f) => <div key={f} className="grid aspect-video place-items-center rounded-lg bg-slate-100 text-xs text-slate-500">{f}: not available</div>)}</div>}
           </Card>
           <Card className="xl:col-span-3">
@@ -2336,9 +2638,10 @@ export function Assessment() {
   )
 }
 /* ---------- ALERTS (built from the events feed: priority = risk, unread = not resolved) ---------- */
+/** Every logged-in user (admin too) keeps their own read / unread state. */
 export function Alerts() {
   const { user } = useAuth()
-  return user && user.role !== 'ADMIN' && !user.dev ? <StaffAlerts /> : <AdminAlerts />
+  return user && !user.dev ? <StaffAlerts /> : <AdminAlerts />
 }
 function AdminAlerts() {
   const ids = useIdentifying()
@@ -2349,7 +2652,7 @@ function AdminAlerts() {
   const list = (ev.data ?? []).filter((e) => (pri === 'All' || e.risk === pri.toUpperCase()) && (read === 'All' || (read === 'Unread' ? !e.resolved : e.resolved))).sort(byRisk)
   return (
     <>
-      <PageHeader title="Alerts" crumbs={[{ label: 'Alerts' }]} actions={<button className={btnS} onClick={() => toast(NC, true)}><CheckCheck size={16} />Mark all as read</button>} />
+      <PageHeader title="Alerts" crumbs={[{ label: 'Alerts' }]} />
       <Card className="!p-0">
         <div className="flex flex-wrap gap-2 border-b p-3">{['All', 'High', 'Medium', 'Low'].map((p) => <button key={p} aria-pressed={pri === p} onClick={() => setPri(p)} className={`${btn} ${pri === p ? 'bg-[#0b1f3a] text-white' : 'border border-slate-300'}`}>{p}</button>)}<select aria-label="Read state" className={inpAuto + ' ml-auto'} value={read} onChange={(e) => setRead(e.target.value)}><option>All</option><option>Unread</option><option>Read</option></select></div>
         {ev.isLoading ? <div className="space-y-2 p-4"><Skeleton /><Skeleton /></div>
@@ -2853,7 +3156,7 @@ function matchState(d: DetectorProgressDto | undefined, matchId: number, known: 
   if (d && d.match_id === matchId) {
     if (d.state === 'running' || d.state === 'starting') {
       const pct = d.frame && d.total_frames ? Math.min(100, Math.round((100 * d.frame) / d.total_frames)) : null
-      return { label: d.state === 'starting' ? 'Starting' : 'Processing', tone: 'blue', pct, live: true }
+      return { label: d.paused ? 'Paused' : d.state === 'starting' ? 'Starting' : 'Processing', tone: d.paused ? 'amber' : 'blue', pct, live: !d.paused }
     }
     if (d.state === 'stopped') return { label: 'Stopped early', tone: 'amber', pct: null, live: false }
   }
@@ -2866,6 +3169,7 @@ function MatchStatusBadge({ matchId, known }: { matchId: number; known: boolean 
 }
 
 function MatchProgress({ matchId, events, known }: { matchId: number; events: number; known: boolean }) {
+  const { user } = useAuth()
   const d = useDetector()
   const s = matchState(d.data, matchId, known)
   const p = d.data
@@ -2883,7 +3187,7 @@ function MatchProgress({ matchId, events, known }: { matchId: number; events: nu
       ) : (
         <p className="mt-2 text-sm text-slate-600">{known ? `Analysis finished · ${events} event(s) detected.` : 'This match has not been reported by the detector.'}</p>
       )}
-      <p className="mt-3 text-xs text-slate-500">Only administrators can start an analysis.</p>
+      <p className="mt-3 text-xs text-slate-500">{user?.role === 'ADMIN' ? 'Start a new analysis from Matches → New analysis.' : 'Only administrators can start an analysis.'}</p>
     </Card>
   )
 }

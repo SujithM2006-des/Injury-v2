@@ -95,7 +95,7 @@ api.interceptors.response.use(
     if (e.response && isEncrypted(e.response.data)) {
       try { e.response.data = await decryptPayload(e.response.data[ENC_FIELD]) } catch { /* keep the raw error */ }
     }
-    const isLogin = e.config?.url?.includes('/auth/login')
+    const isLogin = !!e.config?.url?.match(/\/auth\/(login|firebase)/)
     if (e.response?.status === 401 && !isLogin && onUnauthorized) onUnauthorized()
     return Promise.reject(e)
   },
@@ -106,8 +106,10 @@ export function normalizeApiError(e: unknown): string {
   if (!e.response) return `Can't reach the backend at ${API_BASE}. Is it running?`
   const s = e.response.status
   const d = (e.response.data as { detail?: unknown })?.detail
-  if (typeof d === 'string' && s !== 401) return d
-  if (s === 401) return e.config?.url?.includes('/auth/login') ? 'Invalid username or password.' : 'Your session has expired. Please log in again.'
+  // sign-in calls (password or Google) show the backend's own reason; elsewhere a 401 means the session ended
+  const signIn = !!e.config?.url?.match(/\/auth\/(login|firebase)/)
+  if (typeof d === 'string' && (s !== 401 || signIn)) return d
+  if (s === 401) return signIn ? 'Invalid username or password.' : 'Your session has expired. Please log in again.'
   if (s === 403) return 'You are not authorized to do this.'
   if (s === 404) return 'The requested resource was not found.'
   if (s === 422) return 'Some fields are invalid.'

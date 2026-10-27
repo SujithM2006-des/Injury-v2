@@ -79,6 +79,8 @@ export interface InjuryEvent {
   injuryNote: string | null
   note: string | null
   clipUrl: string | null
+  /** small picture of the fall moment (lists show it instead of loading the clip) */
+  thumbUrl: string | null
   source: string
   resolved: boolean
   timestamp: string

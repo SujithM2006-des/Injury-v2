@@ -11,11 +11,11 @@ import { CalendarDays, CheckCircle2, Download, ExternalLink, FileText, HeartPuls
 import { useAuth } from './auth'
 import { getMe } from './api/services'
 import { normalizeApiError } from './api/client'
-import { useAssessments, useEvents, useInjuryHistory } from './queries'
+import { useAssessments, useEvents, useInjuryHistory, useLiveFeed } from './queries'
 import type { InjuryEvent, RiskLevel } from './types'
 import type { AssessmentDto } from './api/dto'
 import { Badge, Card, EmptyState, ErrorState, Na, PageHeader, RiskBadge, SafetyMeasures, Skeleton, btnS } from './ui'
-import { EventLine, PossibleInjuries, PreviousInjuries, ReportsPage, ROLE_ACCESS, STATUS_TONE, btnSm, fmtDate, fmtVideo } from './pages'
+import { EventLine, LivePanel, PossibleInjuries, PreviousInjuries, ReportsPage, ROLE_ACCESS, STATUS_TONE, btnSm, fmtDate, fmtVideo } from './pages'
 
 /** The logged-in player's account (name, jersey, team, coach). */
 const useMe = () => {
@@ -57,7 +57,7 @@ function FallCard({ e, review }: { e: InjuryEvent; review?: AssessmentDto }) {
     <div className="grid gap-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm lg:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
       <div>
         {e.clipUrl ? (
-          <video className="aspect-video w-full rounded-xl bg-black" src={e.clipUrl} controls preload="metadata" />
+          <video className="aspect-video w-full rounded-xl bg-black" src={e.clipUrl} poster={e.thumbUrl ?? undefined} controls preload="none" />
         ) : (
           <div className="grid aspect-video place-items-center rounded-xl bg-slate-100 text-sm text-slate-500">{e.source === 'manual' ? 'Logged by staff — no video' : 'No clip saved for this event'}</div>
         )}
@@ -241,6 +241,7 @@ export function PlayerDashboard() {
   const me = useMe()
   const ev = useEvents()
   const h = useInjuryHistory()
+  const live = useLiveFeed()
   const dev = !!user?.dev
 
   const all = uniqueFalls(ev.data ?? [])
@@ -268,6 +269,9 @@ export function PlayerDashboard() {
         {KPI.map(([k, v, t]) => <Card key={k}><p className="text-xs text-slate-500">{k}</p>{ev.isLoading ? <Skeleton className="mt-2 h-8 w-12" /> : <p className={`mt-1 truncate font-bold ${typeof v === 'string' ? 'text-2xl' : 'text-3xl'} ${t ?? ''}`} title={typeof v === 'string' ? v : undefined}><Na v={v} /></p>}</Card>)}
       </div>
       <p className="mt-2 text-xs text-slate-500">{dev ? 'Metrics are shown only when real backend data is available.' : `Welcome, ${name}. You see only your own injury data.`}</p>
+
+      {/* the match being analysed right now */}
+      {live && <div className="mt-5"><LivePanel frame={live} /></div>}
 
       {ev.data && (
         <div className="mt-5 grid gap-4 lg:grid-cols-3">

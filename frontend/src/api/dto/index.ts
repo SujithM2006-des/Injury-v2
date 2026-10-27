@@ -41,6 +41,8 @@ export interface EventDto {
   note: string | null
   injury_note: string | null
   clip_url: string | null
+  /** small JPEG of the fall moment, shown in lists instead of loading the clip */
+  thumb_url?: string | null
   source: string
   resolved: boolean
   timestamp: string
@@ -116,6 +118,8 @@ export interface MatchDto {
 export interface UserDto {
   id: number
   username: string
+  /** Gmail for "Sign in with Google" */
+  email?: string | null
   role: string // "admin" | "medical" | "coach" | "player"
   team_id: number | null
   team_name: string | null
@@ -194,7 +198,8 @@ export interface AssessmentDto {
 
 /** GET /detector/status — the detector's live progress for match pages (every role). */
 export interface DetectorProgressDto {
-  state: 'never' | 'starting' | 'running' | 'finished' | 'stopped'
+  /** launching = started from the website, still loading the model */
+  state: 'never' | 'launching' | 'starting' | 'running' | 'finished' | 'stopped'
   match_id?: number | null
   match_name?: string | null
   frame?: number | null
@@ -203,6 +208,10 @@ export interface DetectorProgressDto {
   started_at?: string | null
   finished_at?: string | null
   seconds_since_last_signal?: number | null
+  /** analysis paused / asked to stop from the website */
+  paused?: boolean
+  stop_requested?: boolean
+  video?: string | null
   /** Unidentified falls of the running match that are still being identified (pct = search progress) */
   identifying?: { event_id: number; pct: number }[]
 }

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, NavLink, Navigate, Outlet, useNavigate } from 'react-router-dom'
+import { MonitorPlay } from 'lucide-react'
 import { LayoutDashboard, Users, Shield, Video, Activity, Zap, Bell, FileText, UserCog, Server, Settings, Menu, PanelLeft, Search, LogOut, HelpCircle, ChevronDown, UserRound, History, Info, X, type LucideIcon } from 'lucide-react'
 import { useAuth, home } from './auth'
 import type { InjuryEvent, Role } from './types'
 import { useQueryClient } from '@tanstack/react-query'
-import { useAlertReads, useEvents } from './queries'
+import { useAlertReads, useDetector, useEvents } from './queries'
 import { markAlertsRead } from './api/services'
 import { Badge, Logo, LogoMark, RiskBadge, useDismiss } from './ui'
 import { fmtVideo, identText } from './pages'
@@ -41,6 +42,12 @@ const common = (): N[] => [
 ]
 export const navFor = (r: Role): N[] => {
   const dash: N = { label: 'Dashboard', to: home[r], icon: LayoutDashboard }
+  // every role: the detection of the match being analysed, live
+  const live: N = { label: 'Watch Live', to: '/live', icon: MonitorPlay }
+  return [dash, live, ...navRest(r)]
+}
+
+const navRest = (r: Role): N[] => {
   const set: N = { label: 'Settings', to: '/settings', icon: Settings }
   const rep: N = { label: 'Reports', to: '/reports', icon: FileText }
   // Menu: Injury Events, Teams & Players, Alerts. Players live inside "Teams & Players";
@@ -49,13 +56,13 @@ export const navFor = (r: Role): N[] => {
   // Injury Events, Teams & Players, Alerts
   const main = (teamsLabel: string): N[] => [adminCommon[0], { label: teamsLabel, to: '/teams', icon: Shield }, ...adminCommon.slice(1)]
   // Player: only their own pages
-  if (r === 'PLAYER') return [dash, { label: 'Profile', to: '/player/profile', icon: UserRound }, { label: 'History', to: '/player/history', icon: History }, { label: 'Events', to: '/player/events', icon: Activity }, { label: 'Reports', to: '/player/reports', icon: FileText }]
-  if (r === 'ADMIN') return [dash, ...main('Teams & Players'), rep, { label: 'Users', to: '/admin/users', icon: UserCog }, { label: 'System', to: '/admin/system', icon: Server }, set]
+  if (r === 'PLAYER') return [{ label: 'Profile', to: '/player/profile', icon: UserRound }, { label: 'History', to: '/player/history', icon: History }, { label: 'Events', to: '/player/events', icon: Activity }, { label: 'Reports', to: '/player/reports', icon: FileText }]
+  if (r === 'ADMIN') return [...main('Teams & Players'), rep, { label: 'Users', to: '/admin/users', icon: UserCog }, { label: 'System', to: '/admin/system', icon: Server }, set]
   // Team owner: the admin menu, limited to their own team (the pages themselves only show that team)
-  if (r === 'OWNER') return [dash, ...main('Team & Players'), rep, { label: 'Users', to: '/admin/users', icon: UserCog }, { label: 'System', to: '/admin/system', icon: Server }, set]
+  if (r === 'OWNER') return [...main('Team & Players'), rep, { label: 'Users', to: '/admin/users', icon: UserCog }, { label: 'System', to: '/admin/system', icon: Server }, set]
   // Medical staff and coaches: same short menu as admin (Players, Matches and Collisions are reached from
   // inside "Team & Players" and the events), plus Reports.
-  return [dash, ...main(r === 'COACH' ? 'Team & Players' : 'Teams & Players'), rep, set]
+  return [...main(r === 'COACH' ? 'Team & Players' : 'Teams & Players'), rep, set]
 }
 
 export default function Layout() {
@@ -67,15 +74,17 @@ export default function Layout() {
   const [menu, setMenu] = useState(false)
   const bellRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  // red LIVE tag on "Watch Live" while a match is being analysed
+  const detector = useDetector(!!user && !user.dev)
+  const isLive = ['launching', 'starting', 'running'].includes(detector.data?.state ?? '')
   const closeBell = useCallback(() => setBell(false), [])
   const closeMenu = useCallback(() => setMenu(false), [])
   useDismiss(bell, closeBell, bellRef)
   useDismiss(menu, closeMenu, menuRef)
   const [q, setQ] = useState('')
   const events = useEvents()
-  // Medical staff and coaches: the bell shows their unread alerts (every risk level).
-  // Admin: unchanged, every high-risk event.
-  const staff = !!user && user.role !== 'ADMIN' && !user.dev
+  // Every logged-in user: the bell shows their own unread alerts (every risk level).
+  const staff = !!user && !user.dev
   const reads = useAlertReads(staff)
   const qc = useQueryClient()
 
@@ -127,6 +136,9 @@ export default function Layout() {
             <li key={i.to}>
               <NavLink to={i.to} onClick={() => setDrawer(false)} title={i.label} className={({ isActive }) => link(isActive)}>
                 <i.icon size={19} className="shrink-0" />{wide && i.label}
+                {i.to === '/live' && isLive && (wide
+                  ? <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-red-600 px-1.5 py-0.5 text-[10px] font-bold text-white"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-white" />LIVE</span>
+                  : <span className="absolute right-2 top-2 h-2 w-2 animate-pulse rounded-full bg-red-500" aria-label="Live now" />)}
               </NavLink>
             </li>
           ))}
