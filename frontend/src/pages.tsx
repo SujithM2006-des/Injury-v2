@@ -18,7 +18,7 @@ import type { InjuryEvent, Player, RiskLevel, Role } from './types'
 import { BodyMap, FootballerBack, RoleArt, StadiumBackdrop } from './art'
 import { safetyMeasures, SAFETY_DISCLAIMER } from './safety'
 import { Badge, BarList, Card, Confirm, Disclaimer, DISCLAIMER_2, Donut, EmptyState, ErrorState, Field, IdentityBadge, KpiCard, Logo, LogoMark, Modal, Na, PageHeader, RiskBadge, SafetyMeasures, SERIES, Skeleton, STATUS_COLOR, TrendLine, btn, btnD, btnP, btnS, inp, inpAuto, usePageTitle, useToast, type TileTone, type Tone } from './ui'
-import { KeyRound } from 'lucide-react'
+import { KeyRound, MonitorPlay } from 'lucide-react'
 import { firebaseReady } from './firebase'
 import { ArrowRight, BellRing, BrainCircuit, ClipboardCheck, Crown, Mail, ScanFace, ShieldAlert, ShieldCheck, Stethoscope, UserCog, Video } from 'lucide-react'
 
@@ -1072,8 +1072,24 @@ export function WatchLive() {
   )
 }
 
+/** Slim notice while a match is being analysed; the live picture itself is only on Watch Live. */
+export function LiveNotice({ className = '' }: { className?: string }) {
+  const d = useDetector().data
+  if (!d || !['launching', 'starting', 'running'].includes(d.state)) return null
+  const pct = d.frame && d.total_frames ? Math.min(100, Math.round((100 * d.frame) / d.total_frames)) : null
+  return (
+    <div className={`flex flex-wrap items-center gap-3 rounded-2xl border border-red-200 bg-red-50/70 px-4 py-3 text-sm ${className}`}>
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-red-600 px-2.5 py-1 text-xs font-bold text-white"><span className="h-2 w-2 animate-pulse rounded-full bg-white" />{d.paused ? 'PAUSED' : 'LIVE'}</span>
+      <span className="min-w-0 flex-1 truncate text-navy-900">
+        {d.state === 'launching' ? 'Starting the analysis' : 'Analysing'} <b>{matchShort(d.match_name ?? null) ?? d.video ?? 'a match'}</b>
+        {pct !== null ? ` · ${pct}% done` : ''}{d.events ? ` · ${d.events} incident${d.events === 1 ? '' : 's'} so far` : ''}
+      </span>
+      <Link to="/live" className={btnP + ' !py-1.5'}><MonitorPlay size={16} />Watch Live</Link>
+    </div>
+  )
+}
+
 function DashCharts({ list, loading }: { list: InjuryEvent[]; loading: boolean }) {
-  const live = useLiveFeed()
   if (loading) return <div className="mt-5 grid gap-4 xl:grid-cols-12"><Card className="xl:col-span-8"><Skeleton className="aspect-video h-auto w-full" /></Card><Card className="xl:col-span-4"><Skeleton className="h-40 w-full" /></Card></div>
   const risk = [
     { label: 'High', value: list.filter((e) => e.risk === 'HIGH').length, color: STATUS_COLOR.HIGH },
@@ -1104,7 +1120,7 @@ function DashCharts({ list, loading }: { list: InjuryEvent[]; loading: boolean }
 
   return (
     <div className="mt-5 grid gap-4 xl:grid-cols-12 [&>*]:min-w-0">
-      {live ? <LivePanel frame={live} className="xl:col-span-8" /> : <MatchAnalysisPanel list={list} typeColor={typeColor} />}
+      <MatchAnalysisPanel list={list} typeColor={typeColor} />
       <div className="grid gap-4 md:grid-cols-2 xl:col-span-4 xl:grid-cols-1">
         <Card>
           <h2 className="font-semibold">Risk overview</h2>
@@ -1187,6 +1203,7 @@ export function Dashboard({ role }: { role: Role }) {
       </div>
       {dev && <p className="mt-2 text-xs text-slate-500">Metrics are shown only when real backend data is available.</p>}
       {(role === 'COACH' || role === 'OWNER') && !dev && <p className="mt-2 text-xs text-slate-500">You see your team's events and every unidentified fall.</p>}
+      {!dev && <LiveNotice className="mt-5" />}
       {!ev.isError && <DashCharts list={list} loading={ev.isLoading} />}
 
       {role === 'ADMIN' || role === 'OWNER' ? (
@@ -2283,7 +2300,6 @@ export function MatchDetail() {
 export function Monitor() {
   const { id } = useParams()
   const { user } = useAuth()
-  const live = useLiveFeed()
   const m = (useMatches().data ?? []).find((x) => String(x.id) === id)
   const ev = useEvents(Number(id))
   const list = (ev.data ?? []).filter((e) => e.videoTimeSec !== null).sort((a, b) => (a.videoTimeSec ?? 0) - (b.videoTimeSec ?? 0))
@@ -2293,9 +2309,8 @@ export function Monitor() {
       <PageHeader title={`Match monitor${m ? ` — ${matchShort(m.name)}` : ` #${id}`}`} crumbs={[{ label: 'Matches', to: '/matches' }, { label: matchShort(m?.name ?? null) ?? `#${id}`, to: `/matches/${id}` }, { label: 'Monitor' }]} actions={user?.dev ? undefined : <MatchStatusBadge matchId={Number(id)} known={!!m} />} />
       <div className="grid gap-4 xl:grid-cols-[1fr_320px]">
         <div className="space-y-3">
-          {live ? <LivePanel frame={live} /> : (
-            <div className="relative grid aspect-video place-items-center rounded-2xl bg-slate-900 text-slate-300"><div className="text-center"><VideoOff className="mx-auto" size={36} /><p className="mt-2 font-semibold">Not live right now</p><p className="text-sm text-slate-400">The live view appears here while the detector analyses a match. Open an event to watch its clip.</p></div></div>
-          )}
+          {/* the live picture is only on Watch Live */}
+          <LiveNotice />
           <DetectorControls />
           <Card className="space-y-3">
             <div className="flex items-center justify-between"><h2 className="font-semibold">Incident timeline</h2><span className="text-xs text-slate-500">{list.length} incident{list.length === 1 ? '' : 's'} · click a marker to open it</span></div>

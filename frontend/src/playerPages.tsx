@@ -11,11 +11,11 @@ import { CalendarDays, CheckCircle2, Download, ExternalLink, FileText, HeartPuls
 import { useAuth } from './auth'
 import { getMe } from './api/services'
 import { normalizeApiError } from './api/client'
-import { useAssessments, useEvents, useInjuryHistory, useLiveFeed } from './queries'
+import { useAssessments, useEvents, useInjuryHistory } from './queries'
 import type { InjuryEvent, RiskLevel } from './types'
 import type { AssessmentDto } from './api/dto'
 import { Badge, Card, EmptyState, ErrorState, Na, PageHeader, RiskBadge, SafetyMeasures, Skeleton, btnS } from './ui'
-import { EventLine, LivePanel, PossibleInjuries, PreviousInjuries, ReportsPage, ROLE_ACCESS, STATUS_TONE, btnSm, fmtDate, fmtVideo } from './pages'
+import { EventLine, LiveNotice, PossibleInjuries, PreviousInjuries, ReportsPage, ROLE_ACCESS, STATUS_TONE, btnSm, fmtDate, fmtVideo } from './pages'
 
 /** The logged-in player's account (name, jersey, team, coach). */
 const useMe = () => {
@@ -241,7 +241,6 @@ export function PlayerDashboard() {
   const me = useMe()
   const ev = useEvents()
   const h = useInjuryHistory()
-  const live = useLiveFeed()
   const dev = !!user?.dev
 
   const all = uniqueFalls(ev.data ?? [])
@@ -270,8 +269,8 @@ export function PlayerDashboard() {
       </div>
       <p className="mt-2 text-xs text-slate-500">{dev ? 'Metrics are shown only when real backend data is available.' : `Welcome, ${name}. You see only your own injury data.`}</p>
 
-      {/* the match being analysed right now */}
-      {live && <div className="mt-5"><LivePanel frame={live} /></div>}
+      {/* a match being analysed right now: the live picture is on Watch Live */}
+      {!dev && <LiveNotice className="mt-5" />}
 
       {ev.data && (
         <div className="mt-5 grid gap-4 lg:grid-cols-3">
