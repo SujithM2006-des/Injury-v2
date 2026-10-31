@@ -159,10 +159,16 @@ ROSTERS = {
 
 PLACEHOLDER_TEAMS = {"Portugal": "Team A", "Netherlands": "Team B"}
 
-# (username, team, password used only when the account does not exist yet)
-COACH_ACCOUNTS = [
-    ("coach1", "Netherlands", "coach1pass"),
-    ("coach2", "Portugal", "coach2pass"),
+# Demo logins (username + password, next to Sign in with Google).
+# Created if missing and their password is set back to this one on every start.
+# (username, role, team, password); a player login belongs to the roster player (team, jersey)
+DEMO_ACCOUNTS = [
+    ("admin", "admin", None, "admin123"),
+    ("medical1", "medical", None, "medical123"),
+    ("CR7", "player", ("Portugal", 17), "123456"),
+    ("owner1", "owner", "Portugal", "owner123"),
+    ("coach1", "coach", "Netherlands", "coach123"),
+    ("coach2", "coach", "Portugal", "coach123"),
 ]
 
 
@@ -210,24 +216,46 @@ def bootstrap_data():
 
         db.flush()
 
-        # 3. coach accounts
-        for username, team_name, password in COACH_ACCOUNTS:
+        # 3. demo accounts (password login)
+        player_links = {}
+
+        for username, role, where, password in DEMO_ACCOUNTS:
+
+            player = None
+            team_id = None
+
+            if role == "player":
+                team_name, jersey = where
+                player = next((p for p in _players_of_team(db, teams[team_name].id) if p.jersey_number == jersey), None)
+                team_id = teams[team_name].id
+            elif where is not None:
+                team_id = teams[where].id
 
             user = _user_named(db, username)
 
             if user is None:
-                db.add(User(
-                    username=username,
-                    password_hash=pwd_context.hash(password),
-                    role="coach",
-                    team_id=teams[team_name].id,
-                ))
-                print("[BOOTSTRAP] created", username, "->", team_name, "| password:", password)
+                user = User(username=username, password_hash=pwd_context.hash(password), role=role, team_id=team_id)
+                db.add(user)
+                db.flush()
+                print("[BOOTSTRAP] created", username, "(" + role + ") | password:", password)
 
-            elif user.team_id != teams[team_name].id or user.role != "coach":
-                user.role = "coach"
-                user.team_id = teams[team_name].id
-                print("[BOOTSTRAP] assigned", username, "->", team_name)
+            else:
+                if not verify_password(password, user.password_hash):
+                    user.password_hash = pwd_context.hash(password)
+                    print("[BOOTSTRAP] demo password set for", username)
+                if user.role != role or user.team_id != team_id:
+                    user.role = role
+                    user.team_id = team_id
+                    print("[BOOTSTRAP] assigned", username, "->", role, where or "")
+
+            if player is not None:
+                player_links[str(user.id)] = player.id
+
+        if player_links:
+            accounts = _player_accounts()
+            if any(accounts.get(k) != v for k, v in player_links.items()):
+                accounts.update(player_links)
+                _save_json(PLAYER_ACCOUNTS_FILE, accounts)
 
         # 4. admin (only if none exists)
         if not any(u.role == "admin" for u in db.query(User).all()):
@@ -288,14 +316,8 @@ def _same_fall(a, b, key_a=None):
 
 
 def _keep_score(e):
-    """Which copy of a duplicate to keep: staff pick > identified (by confidence) > has clip > oldest."""
-    return (
-        1 if e.identified_by == "manual" else 0,
-        1 if e.player_id is not None else 0,
-        e.id_confidence or 0.0,
-        1 if e.clip_path else 0,
-        -e.id,
-    )
+    """Which copy of a duplicate to keep: the newest (the latest run replaces earlier ones)."""
+    return e.id
 
 
 def _clip_exists(clip_path):
@@ -605,17 +627,15 @@ def event_to_dict(e: InjuryEvent):
 
 @app.post("/auth/login")
 def login(request: LoginRequest, db: Session = Depends(get_db)):
-    """Username + password: kept for the admin only (emergency way in when Google / Firebase is unreachable).
-    Everyone else signs in with Google (POST /auth/firebase)."""
+    """Username (or registered Gmail) + password, for every role - next to Sign in with Google (POST /auth/firebase).
+    Logins made for Google only have a random password nobody knows, so they cannot be used here."""
 
-    user = _user_named(db, request.username)
+    user = _user_named(db, request.username) or _user_with_email(db, request.username)
 
     if user is None or not verify_password(request.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
-    if user.role != "admin":
-        raise HTTPException(status_code=403, detail="Please use 'Sign in with Google' with the Gmail your administrator registered.")
-
+    print("[AUTH]", user.username, "signed in with a password (" + user.role + ")")
     return _issue_login(user)
 
 
@@ -785,46 +805,67 @@ def create_event(request: EventCreateRequest, db: Session = Depends(get_db)):
         event.id_detail = request.id_detail
         event.id_confidence = request.id_confidence
 
-    # Same fall already saved by an earlier run of this video? Reuse that event.
-    existing = _find_duplicate(db, event)
+    # Same fall already saved by an earlier run of this video? The new run replaces it:
+    # the old copies (rows, clips, AI results) are deleted and this event is stored.
+    old_copies = _find_duplicates(db, event)
 
-    if existing is not None:
-
-        # fill in the player if the earlier copy never got one (never overrides staff)
-        if existing.player_id is None and event.player_id is not None:
-            existing.player_id = event.player_id
-            existing.identified_at = now_utc()
-            existing.identified_by = event.identified_by
-            existing.id_detail = event.id_detail
-            existing.id_confidence = event.id_confidence
-            db.commit()
-
-        return {
-            "message": "Duplicate of an event from an earlier run of this video",
-            "event_id": existing.id,
-            "duplicate": True,
-        }
+    if old_copies:
+        # keep the player if this run did not identify one (e.g. picked by staff earlier)
+        if event.player_id is None:
+            known = next((c for c in old_copies if c.player_id is not None), None)
+            if known is not None:
+                event.player_id = known.player_id
+                event.identified_at = known.identified_at
+                event.identified_by = known.identified_by
+                event.id_detail = known.id_detail
+                event.id_confidence = known.id_confidence
 
     db.add(event)
-    db.commit()
+    removed = _delete_events(db, old_copies)
     db.refresh(event)
+
+    if removed:
+        print("[EVENTS] Event", event.id, "replaces", removed, "from an earlier run of this video")
+        # duplicate=True keeps the detector from sending the WhatsApp alerts again
+        return {"message": "Event recorded (replaces " + ", ".join("#" + str(i) for i in removed) + ")",
+                "event_id": event.id, "duplicate": True, "replaced": removed}
 
     return {"message": "Event recorded", "event_id": event.id, "duplicate": False}
 
 
-def _find_duplicate(db, new_event):
-    """Closest matching event from an earlier run of the same video, or None."""
+def _delete_events(db, events):
+    """Deletes the events with their clip files and AI / assessment results; commits. Returns their ids."""
+    ids = [e.id for e in events]
+    clips = {e.clip_path for e in events if e.clip_path}
+    for e in events:
+        db.delete(e)
+    db.commit()
+    for clip in clips:
+        if not _clip_used_by_other_event(db, clip, ids):
+            _remove_clip_file(clip)
+    if ids:
+        for path in (AI_INJURY_FILE, AI_TREATMENT_FILE, ASSESSMENTS_FILE):
+            data = _load_json(path, None)
+            if isinstance(data, dict) and any(str(i) in data for i in ids):
+                for i in ids:
+                    data.pop(str(i), None)
+                _save_json(path, data)
+    return ids
+
+
+def _find_duplicates(db, new_event):
+    """Every event from an earlier run of the same video that is the same fall as new_event."""
 
     if new_event.match_session_id is None or new_event.video_time_sec is None:
-        return None
+        return []
     if (new_event.source or "ai") != "ai":
-        return None
+        return []
 
     match = db.query(MatchSession).filter(MatchSession.id == new_event.match_session_id).first()
     key = _video_key(match)
 
     if key is None:
-        return None
+        return []
 
     # match and video time are encrypted: checked in Python
     candidates = [
@@ -838,13 +879,7 @@ def _find_duplicate(db, new_event):
         and c.match is not None
     ]
 
-    matches = [c for c in candidates if _same_fall(new_event, c, key_a=key)]
-
-    if not matches:
-        return None
-
-    matches.sort(key=lambda c: abs(c.video_time_sec - new_event.video_time_sec))
-    return matches[0]
+    return [c for c in candidates if _same_fall(new_event, c, key_a=key)]
 
 
 # ============================================
@@ -1489,20 +1524,7 @@ def delete_event(event_id: int, current_user: User = Depends(get_current_user), 
     if event is None:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    clip_path = event.clip_path
-    shared = _clip_used_by_other_event(db, clip_path, [event.id])
-
-    db.delete(event)
-    db.commit()
-
-    if clip_path and not shared:
-        _remove_clip_file(clip_path)
-
-    for path in (AI_INJURY_FILE, AI_TREATMENT_FILE, ASSESSMENTS_FILE):
-        data = _load_json(path, None)
-        if isinstance(data, dict) and str(event_id) in data:
-            data.pop(str(event_id))
-            _save_json(path, data)
+    _delete_events(db, [event])
 
     print("[EVENTS]", current_user.username, "deleted event", event_id)
 
@@ -2990,8 +3012,9 @@ def delete_injury_history(record_id: int, current_user: User = Depends(get_curre
 #   1 medium fall, or 3+ low falls        -> MEDIUM
 #   1-2 low falls                          -> LOW
 #   no falls                               -> NONE
-# Re-running the same video reuses the falls saved by the earlier run (duplicate check), so those
-# falls count too, as soon as the video reaches their time. Gemini false alarms do not count.
+# Re-running the same video: a fall found again replaces the earlier run's copy (create_event);
+# earlier falls not found again still count as soon as the video reaches their time.
+# Gemini false alarms do not count.
 # BAND_HOLD_AFTER_MATCH_MIN minutes after the video finishes the band goes back to NONE.
 # ============================================
 from datetime import datetime as _band_dt, timedelta as _band_td, timezone as _band_tz
@@ -3138,10 +3161,39 @@ def _band_summary(player_id, key, db):
     # worst first; Unidentified falls after named players with the same level
     players.sort(key=lambda r: (-_BAND_RANK[r["level"]], r["player_id"] is None, -r["falls"], r["name"]))
     level = _band_level(counts["HIGH"], counts["MEDIUM"], counts["LOW"])
-    return {"level": level, "falls": sum(counts.values()), "high": counts["HIGH"], "medium": counts["MEDIUM"],
+    forced = _band_forced_level()
+    return {"level": forced or level, "forced": bool(forced), "falls": sum(counts.values()),
+            "high": counts["HIGH"], "medium": counts["MEDIUM"],
             "low": counts["LOW"], "match_id": match_id, "match_name": match_name, "match_state": state,
             "video_now": round(video_now, 1) if video_now is not None else None,
             "players": players, "events": counted}
+
+
+# MANUAL BAND OVERRIDE (for testing the band):
+# POST /band/force?key=...&level=HIGH|MEDIUM|LOW|NONE&minutes=5  -> every band shows that level
+# POST /band/force?key=...&level=AUTO                             -> back to the real level
+_band_force = {"level": None, "until": None}
+
+
+def _band_forced_level():
+    until = _band_force["until"]
+    if _band_force["level"] and until and _band_dt.now(_band_tz.utc) > until:
+        _band_force["level"] = None
+    return _band_force["level"]
+
+
+@app.post("/band/force")
+def band_force(key: str = Query(""), level: str = Query("AUTO"), minutes: int = Query(5, ge=1, le=240)):
+    if key != _band_key():
+        raise HTTPException(status_code=403, detail="Wrong band key")
+    level = level.upper()
+    if level == "AUTO":
+        _band_force.update(level=None, until=None)
+        return {"forced": False, "message": "Band back to the real level"}
+    if level not in _BAND_RANK:
+        raise HTTPException(status_code=400, detail="level must be HIGH, MEDIUM, LOW, NONE or AUTO")
+    _band_force.update(level=level, until=_band_dt.now(_band_tz.utc) + _band_td(minutes=minutes))
+    return {"forced": True, "level": level, "until": _band_force["until"].isoformat()}
 
 
 @app.get("/band/{player_id}/status", response_class=_BandText)

@@ -588,6 +588,16 @@ const LANDING_ROLES: [LucideIcon, string, string][] = [
   [UserCheck, 'Player', 'See your own falls, expected rest, history and medical outcome.'],
 ]
 
+/** Demo logins (backend DEMO_ACCOUNTS): [label, username, password] */
+const DEMO_LOGINS: [string, string, string][] = [
+  ['Admin', 'admin', 'admin123'],
+  ['Medical staff', 'medical1', 'medical123'],
+  ['Player (CR7)', 'CR7', '123456'],
+  ['Team owner', 'owner1', 'owner123'],
+  ['Coach · Netherlands', 'coach1', 'coach123'],
+  ['Coach · Portugal', 'coach2', 'coach123'],
+]
+
 /** Google "G" mark for the sign-in button */
 const GoogleLogo = () => (
   <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
@@ -628,6 +638,11 @@ export function Login() {
       setGoogleBusy(false)
     }
   }
+  const demo = (username: string, password: string) => {
+    f.setValue('username', username)
+    f.setValue('password', password)
+    void go()
+  }
   const toLogin = () => {
     document.getElementById('login')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
     setTimeout(() => document.getElementById('google-login')?.focus(), 400)
@@ -643,7 +658,7 @@ export function Login() {
           <ul className="space-y-2 text-sm text-slate-700">
             <li className="rounded-xl bg-slate-50 p-3"><b>Forgot your Google password?</b> Reset it at Google (accounts.google.com). AthleteGuard never stores it.</li>
             <li className="rounded-xl bg-slate-50 p-3"><b>"Not registered"?</b> Your Gmail has not been added yet. Coaches and players: ask your team owner or the administrator. Medical staff and team owners: ask the administrator.</li>
-            <li className="rounded-xl bg-slate-50 p-3"><b>Administrator password lost?</b> Run <code>python reset_password.py</code> on the server.</li>
+            <li className="rounded-xl bg-slate-50 p-3"><b>Password lost?</b> Ask the administrator to set a new one, or run <code>python reset_password.py</code> on the server.</li>
           </ul>
           <button className={btnS + ' w-full justify-center'} onClick={() => setForgot(false)}>Back to login</button>
         </div>
@@ -668,7 +683,17 @@ export function Login() {
             {googleBusy ? <Loader2 size={18} className="animate-spin" /> : <GoogleLogo />}{googleBusy ? 'Signing in…' : 'Sign in with Google'}
           </button>
           {!firebaseReady && <p className="rounded-lg bg-amber-50 p-2.5 text-xs text-amber-800">Google sign-in is not set up yet: the Firebase settings are missing in <code>frontend/.env</code>.</p>}
-          <p className="text-center text-[11px] text-slate-400">Password login is for administrators. Coaches, medical staff, owners and players: use Sign in with Google.</p>
+          <div className="space-y-2">
+            <p className="text-center text-xs font-medium text-slate-400">DEMO ACCOUNTS · CLICK TO SIGN IN</p>
+            <div className="grid grid-cols-2 gap-2">
+              {DEMO_LOGINS.map(([label, username, password]) => (
+                <button key={username} type="button" disabled={f.formState.isSubmitting} onClick={() => demo(username, password)}
+                  className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-left text-xs transition hover:border-brand-300 hover:bg-brand-50 disabled:opacity-60">
+                  <span className="block font-semibold text-navy-900">{label}</span><span className="text-slate-500">{username} · {password}</span>
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       )}
       <p className="mt-4 text-center text-xs text-slate-500">Don't have an account? Ask your organization's administrator.</p>
